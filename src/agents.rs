@@ -51,6 +51,9 @@ pub struct Relationship {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KgOutput {
+    /// Short Title-Case noun phrase naming the note. Drives filename + index.
+    pub title: String,
+    /// One-sentence (≤160 char) summary shown in INDEX.md next to the title.
     pub summary: String,
     pub tags: Vec<String>,
     pub entities: Vec<String>,
@@ -67,9 +70,10 @@ pub struct KgOutput {
 fn kg_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["summary", "tags", "entities", "relationships", "markdown_snippet"],
+        "required": ["title", "summary", "tags", "entities", "relationships", "markdown_snippet"],
         "properties": {
-            "summary":          { "type": "string" },
+            "title":            { "type": "string", "description": "3–8 word Title-Case note title" },
+            "summary":          { "type": "string", "description": "Single sentence, ≤160 chars, for the index" },
             "tags":             { "type": "array", "items": { "type": "string" } },
             "entities":         { "type": "array", "items": { "type": "string" } },
             "relationships": {
@@ -88,6 +92,14 @@ fn kg_schema() -> Value {
         }
     })
 }
+
+// ----------------------------------------------------------------------------
+// Skill prompts — compiled into the binary; see `skills/*.md`.
+// ----------------------------------------------------------------------------
+
+pub const KG_EXTRACTOR_SKILL: &str = include_str!("../skills/kg_extractor.md");
+pub const RESEARCHER_SKILL: &str = include_str!("../skills/researcher.md");
+pub const OBSIDIAN_WRITER_SKILL: &str = include_str!("../skills/obsidian_writer.md");
 
 // ----------------------------------------------------------------------------
 // Knowledge graph extractor (schema-forced single-shot call)
@@ -126,18 +138,20 @@ impl KnowledgeGraphAgent {
     }
 
     /// Single call: rate-limited, schema-forced, parsed.
+    #[tracing::instrument(level = "info", skip(self, batched_text), fields(bytes = batched_text.len(), model = %self.model))]
     pub async fn extract(&self, batched_text: &str) -> AppResult<KgOutput> {
         // Governor: wait for a slot.
         self.limiter.until_ready().await;
 
-        let system = "You are a knowledge-graph extractor. Read the provided \
-                      documents and output ONLY JSON matching the schema. Use \
-                      [[Concept]] wikilinks for each named entity inside \
-                      markdown_snippet. Keep tags short and lowercase.";
+        // Inline the two skills as the system preamble. This gives the small
+        // model explicit, numbered instructions it can follow mechanically.
+        let system = format!(
+            "{KG_EXTRACTOR_SKILL}\n\n---\n\n{OBSIDIAN_WRITER_SKILL}"
+        );
 
         let messages = vec![
             ChatMessage::user()
-                .content(format!("{system}\n\n---\n\n{batched_text}"))
+                .content(format!("{system}\n\n---\n\n# Input documents\n\n{batched_text}"))
                 .build(),
         ];
 
@@ -225,10 +239,12 @@ impl autoagents::core::agent::AgentDeriveT for ResearchAgentDef {
     }
 
     fn description(&self) -> &'static str {
+        // Full researcher skill is injected into the user prompt below; this
+        // description is the short blurb the ReAct executor shows to the LLM
+        // in the tool-use header. Keep it tight.
         "Deep-research assistant that enriches knowledge-graph concepts with \
-         external context. Use web_search to find authoritative sources, \
-         web_fetch to pull page text, and vault_search to avoid duplicating \
-         existing notes. Always cite your sources."
+         external context. Follows the Concept Researcher skill: vault_search \
+         first, then web_search, then web_fetch; cite every source; ≤6 calls."
     }
 
     fn output_schema(&self) -> Option<Value> {
@@ -287,6 +303,7 @@ impl ResearchStack {
     }
 
     /// Run the agent against a single concept and return the brief.
+    #[tracing::instrument(level = "info", skip(self, hint), fields(hint_bytes = hint.len()))]
     pub async fn research(&self, concept: &str, hint: &str) -> AppResult<ResearchBrief> {
         let agent_def = ResearchAgentDef {
             web_search: self.web_search.clone(),
@@ -304,9 +321,10 @@ impl ResearchStack {
             .map_err(|e| AppError::Actor(format!("research build: {e}")))?;
 
         let prompt = format!(
-            "Research the concept: \"{concept}\".\n\nContext from source document:\n{hint}\n\n\
-             Produce a concise brief with citations. Output JSON: \
-             {{\"brief\": string, \"sources\": [url, ...]}}."
+            "{RESEARCHER_SKILL}\n\n---\n\n\
+             # Task\n\nResearch the concept: \"{concept}\".\n\n\
+             ## Context from source document\n\n{hint}\n\n\
+             Now follow the procedure above and emit the final JSON."
         );
         let task = Task::new(prompt);
 
