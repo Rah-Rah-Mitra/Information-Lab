@@ -1,0 +1,29 @@
+[Unit]
+Description=Edge-Native Knowledge Graph Agent
+After=network-online.target syncthing@pi.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/edge-kg-agent
+EnvironmentFile=/home/pi/edge-kg-agent/.env
+ExecStart=/home/pi/edge-kg-agent/target/release/edge-kg-agent
+Restart=on-failure
+RestartSec=5s
+
+# Resource hygiene on Pi 5
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+LimitNOFILE=4096
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/pi/Obsidian/Vault /home/pi/edge-kg-agent
+PrivateTmp=true
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
