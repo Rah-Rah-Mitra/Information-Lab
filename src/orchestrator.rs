@@ -6,7 +6,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{sync::mpsc, time};
-use tracing::{error, info, warn};
+use tracing::{error, info, instrument, warn, Instrument};
 use uuid::Uuid;
 
 use crate::{
@@ -49,7 +49,8 @@ impl Orchestrator {
         let db = self.db.clone();
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
-                match ingest_pdf(&db, &path).await {
+                let span = tracing::info_span!("ingest", path = %path.display());
+                match ingest_pdf(&db, &path).instrument(span).await {
                     Ok(IngestOutcome::Ingested { hash, chunks }) => {
                         info!(%hash, chunks, "ingested");
                     }
@@ -82,6 +83,9 @@ impl Orchestrator {
                 ticker.tick().await;
 
                 // Drain as long as there's pending work (governor rate-limits us anyway).
+                // Per-batch span happens inside `extract` / `enrich` / `write_note`
+                // via `#[instrument]`; the `batch_id` field is attached to each
+                // log site below so the trail is searchable either way.
                 loop {
                     let batch_id = Uuid::new_v4().to_string();
                     let chunks = match db.claim_batch(budget, &batch_id).await {
@@ -157,6 +161,7 @@ impl Orchestrator {
 
 /// Fire research at up to N top concepts and append briefs to the snippet.
 /// Serialized (not parallel) so we respect the 15 RPM shared bucket.
+#[instrument(level = "info", skip_all, fields(picks = out.entities.len()))]
 async fn enrich(out: &mut KgOutput, research: &Arc<ResearchStack>, source_hint: &str) {
     const MAX_CONCEPTS: usize = 3;
     let picks: Vec<String> = out.entities.iter().take(MAX_CONCEPTS).cloned().collect();

@@ -60,6 +60,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+tracing-opentelemetry = "0.27"
+opentelemetry = { version = "0.26", features = ["trace"] }
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.26", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.26"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

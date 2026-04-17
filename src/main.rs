@@ -7,6 +7,7 @@ mod error;
 mod ingest;
 mod orchestrator;
 mod status;
+mod telemetry;
 mod tools;
 mod vault;
 mod watcher;
@@ -15,7 +16,6 @@ use std::process::ExitCode;
 
 use tokio::signal;
 use tracing::{error, info};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::{
     agents::{KnowledgeGraphAgent, ResearchStack},
@@ -41,7 +41,10 @@ async fn main() -> ExitCode {
 
 async fn run() -> AppResult<()> {
     let cfg = Config::from_env()?;
-    init_tracing(&cfg)?;
+    let telemetry_guard = telemetry::init(&cfg)?;
+    // Keep the guard alive for the lifetime of the process so both the
+    // non-blocking file writer and the OTel batch exporter can flush.
+    Box::leak(Box::new(telemetry_guard));
 
     info!(
         watch = %cfg.watch_dir.display(),
@@ -83,24 +86,6 @@ async fn run() -> AppResult<()> {
 
     shutdown_signal().await;
     info!("shutdown signal received");
-    Ok(())
-}
-
-fn init_tracing(cfg: &Config) -> AppResult<()> {
-    std::fs::create_dir_all(&cfg.log_dir)?;
-    let file_appender = tracing_appender::rolling::daily(&cfg.log_dir, "edge-kg-agent.log");
-    let (nb_file, guard) = tracing_appender::non_blocking(file_appender);
-    // The guard must outlive the process so the background writer keeps flushing.
-    Box::leak(Box::new(guard));
-
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("edge_kg_agent=info,warn"));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_target(true).with_ansi(true))
-        .with(fmt::layer().json().with_writer(nb_file))
-        .init();
     Ok(())
 }
 

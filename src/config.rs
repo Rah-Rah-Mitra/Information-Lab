@@ -37,6 +37,14 @@ pub struct Config {
     pub batch_token_target: usize,
     /// Cadence for SYSTEM_STATUS.md regeneration.
     pub status_interval: Duration,
+
+    /// OTLP endpoint (e.g. `http://127.0.0.1:4317`). When empty, OpenTelemetry
+    /// export is disabled and tracing falls back to console + file only.
+    pub otlp_endpoint: Option<String>,
+    /// `service.name` resource attribute for OTel.
+    pub otel_service_name: String,
+    /// Additional resource attributes, comma-separated `k=v` pairs.
+    pub otel_resource_attributes: Option<String>,
 }
 
 impl Config {
@@ -65,6 +73,14 @@ impl Config {
             fs_debounce: Duration::from_millis(env_parse("FS_DEBOUNCE_MS", 2000_u64)?),
             batch_token_target: env_parse("BATCH_TOKEN_TARGET", 25_000_usize)?,
             status_interval: Duration::from_secs(env_parse("STATUS_INTERVAL_SECS", 300_u64)?),
+
+            otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            otel_service_name: env_or("OTEL_SERVICE_NAME", "edge-kg-agent"),
+            otel_resource_attributes: std::env::var("OTEL_RESOURCE_ATTRIBUTES")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
         })
     }
 }
