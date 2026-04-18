@@ -33,12 +33,14 @@ pub enum AppError {
     #[error("watcher: {0}")]
     Watcher(#[from] notify::Error),
 
+    #[allow(dead_code)] // reserved for surfacing upstream status codes
     #[error("api returned {status}: {body}")]
     Api { status: u16, body: String },
 
     #[error("schema validation: {0}")]
     Schema(String),
 
+    #[allow(dead_code)] // reserved for actor-framework errors
     #[error("actor: {0}")]
     Actor(String),
 

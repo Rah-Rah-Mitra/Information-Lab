@@ -125,6 +125,7 @@ impl KnowledgeGraphAgent {
         })
     }
 
+    #[allow(dead_code)] // exposed for future status reporting
     pub fn model(&self) -> &str {
         &self.model
     }

@@ -20,9 +20,15 @@
 //! both GIS and Stats tag a note `kernel-density-estimation`, both end up
 //! in `Topics/kernel-density-estimation.md`.
 //!
-//! Index files cap at `INDEX_ENTRY_CAP` entries (default 20). Overflow is
-//! currently logged as a warning — automatic split into sub-indexes is a
-//! follow-up (see task #13).
+//! Index files cap at `INDEX_ENTRY_CAP` entries (default 20). On overflow
+//! the file is split into alphabetical buckets (`a-e`, `f-j`, `k-o`,
+//! `p-t`, `u-z`, `other`) under a same-named sub-directory, and the
+//! original file is replaced with a parent-of-buckets pointer index
+//! (`split: true` in frontmatter). Subsequent `upsert_index_entry` calls
+//! follow the pointer to the correct bucket. Buckets are stable — adding
+//! an entry never renames an existing bucket file, so Obsidian wikilinks
+//! stay valid. A single bucket exceeding the cap is logged as a warning
+//! (deep splitting is not implemented).
 
 use std::path::{Path, PathBuf};
 
@@ -199,22 +205,44 @@ struct IndexEntry {
 }
 
 /// Append (or no-op if already present) a one-line entry to an index file.
-/// Creates the file with a typed frontmatter header on first use.
+/// Creates the file with a typed frontmatter header on first use. If the
+/// target is already a split parent, follows the pointer to the right
+/// bucket. If the append pushes a leaf over `cap`, triggers a bucket
+/// split (unless the leaf is itself a bucket — we don't deep-split).
 async fn upsert_index_entry(
     index_path: &Path,
     file: &IndexFile,
     entry: &IndexEntry,
 ) -> AppResult<()> {
-    if let Some(parent) = index_path.parent() {
-        fs::create_dir_all(parent).await?;
+    // Follow split-parent pointers to a leaf.
+    let mut target = index_path.to_path_buf();
+    loop {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let existing = fs::read_to_string(&target).await.unwrap_or_default();
+        if !is_split_parent(&existing) {
+            break;
+        }
+        let stem = target
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("index")
+            .to_string();
+        let parent_dir = target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let bucket = bucket_for(&entry.title);
+        target = parent_dir.join(&stem).join(format!("{bucket}.md"));
     }
 
-    let existing = fs::read_to_string(index_path).await.unwrap_or_default();
+    let existing = fs::read_to_string(&target).await.unwrap_or_default();
     let marker = format!("({})", entry.rel_path);
     let line = render_entry_line(entry);
 
     let mut body = if existing.is_empty() {
-        build_index_seed(file)
+        build_index_seed(file, Some(&target))
     } else if existing.contains(&marker) {
         return Ok(()); // already indexed — idempotent
     } else {
@@ -230,28 +258,202 @@ async fn upsert_index_entry(
         body.pop();
     }
 
-    // Count entries (lines starting with "- [[" or "- [" after the body
-    // marker) and warn if we've exceeded the cap.
     let count = body
         .lines()
         .filter(|l| l.starts_with("- [["))
         .count();
-    if count > file.cap {
-        warn!(
-            index = %index_path.display(),
-            entries = count,
-            cap = file.cap,
-            "index exceeds entry cap — split pending (task #13)"
-        );
-    }
 
-    let mut f = fs::File::create(index_path).await?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut f = fs::File::create(&target).await?;
     f.write_all(body.as_bytes()).await?;
     f.sync_all().await?;
+
+    if count > file.cap {
+        if is_bucket_leaf(&target) {
+            warn!(
+                index = %target.display(),
+                entries = count,
+                cap = file.cap,
+                "bucket index over cap — deep-split not implemented"
+            );
+        } else {
+            split_index(&target, file).await?;
+        }
+    }
     Ok(())
 }
 
-fn build_index_seed(file: &IndexFile) -> String {
+/// Split an overflowing leaf index into alphabetical bucket children.
+/// The original file is rewritten as a split-parent pointing at the
+/// buckets it now aggregates. Idempotent-safe: re-entering on an
+/// already-split file is a no-op (is_split_parent short-circuits).
+async fn split_index(index_path: &Path, file: &IndexFile) -> AppResult<()> {
+    let existing = fs::read_to_string(index_path).await.unwrap_or_default();
+    if is_split_parent(&existing) {
+        return Ok(());
+    }
+
+    let entries: Vec<ParsedEntry> = existing
+        .lines()
+        .filter_map(parse_entry_line)
+        .collect();
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let stem = index_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("index")
+        .to_string();
+    let parent_dir = index_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let bucket_dir = parent_dir.join(&stem);
+    fs::create_dir_all(&bucket_dir).await?;
+
+    let mut buckets: std::collections::BTreeMap<&'static str, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for e in &entries {
+        buckets
+            .entry(bucket_for(&e.title))
+            .or_default()
+            .push(e.raw.clone());
+    }
+
+    for (bucket, lines) in &buckets {
+        let bucket_path = bucket_dir.join(format!("{bucket}.md"));
+        let mut body = build_index_seed(file, Some(&bucket_path));
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        for l in lines {
+            body.push_str(l);
+            body.push('\n');
+        }
+        let mut f = fs::File::create(&bucket_path).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+    }
+
+    // Replace original file with a split-parent pointer index.
+    let pointer = build_split_parent(file, &stem, buckets.keys().copied().collect());
+    let mut f = fs::File::create(index_path).await?;
+    f.write_all(pointer.as_bytes()).await?;
+    f.sync_all().await?;
+
+    info!(
+        index = %index_path.display(),
+        buckets = buckets.len(),
+        entries = entries.len(),
+        "index split into alphabetical buckets"
+    );
+    Ok(())
+}
+
+struct ParsedEntry {
+    title: String,
+    raw: String,
+}
+
+fn parse_entry_line(line: &str) -> Option<ParsedEntry> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("- [[") {
+        return None;
+    }
+    let after = &trimmed[4..];
+    let end = after.find("]]")?;
+    let title = after[..end].to_string();
+    Some(ParsedEntry {
+        title,
+        raw: line.to_string(),
+    })
+}
+
+fn is_split_parent(content: &str) -> bool {
+    let mut in_fm = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if !in_fm {
+                in_fm = true;
+                continue;
+            } else {
+                break;
+            }
+        }
+        if in_fm && line.trim() == "split: true" {
+            return true;
+        }
+    }
+    false
+}
+
+const BUCKETS: &[&str] = &["a-e", "f-j", "k-o", "p-t", "u-z", "other"];
+
+fn bucket_for(title: &str) -> &'static str {
+    let c = title
+        .chars()
+        .find(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .unwrap_or('_');
+    match c {
+        'a'..='e' => "a-e",
+        'f'..='j' => "f-j",
+        'k'..='o' => "k-o",
+        'p'..='t' => "p-t",
+        'u'..='z' => "u-z",
+        _ => "other",
+    }
+}
+
+fn is_bucket_leaf(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| BUCKETS.contains(&s))
+        .unwrap_or(false)
+}
+
+fn build_split_parent(file: &IndexFile, stem: &str, buckets: Vec<&'static str>) -> String {
+    let (kind_label, title) = match &file.kind {
+        IndexKind::Source { source } => ("source", source.clone()),
+        IndexKind::Topic { tag } => ("topic", tag.clone()),
+    };
+    let created = Utc::now().to_rfc3339();
+    let mut s = format!(
+        "---\n\
+         type: index\n\
+         index_kind: {kind_label}\n\
+         split: true\n\
+         title: {yaml_title}\n\
+         created: {created}\n\
+         ---\n\n\
+         # {title}\n\n\
+         This index grew past its entry cap and was split into alphabetical \
+         buckets. Open the bucket that covers the title you're looking for.\n\n\
+         ## Buckets\n\n",
+        kind_label = kind_label,
+        yaml_title = yaml_scalar(&title),
+        created = created,
+        title = title,
+    );
+    for b in buckets {
+        s.push_str(&format!(
+            "- [[{stem}/{b}]] ({stem}/{b}.md)\n",
+            stem = stem,
+            b = b
+        ));
+    }
+    s
+}
+
+fn build_index_seed(file: &IndexFile, path: Option<&Path>) -> String {
+    let bucket_note = path
+        .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+        .filter(|s| BUCKETS.contains(s))
+        .map(|s| format!(" (bucket `{s}`)"));
     let (kind_label, title, description) = match &file.kind {
         IndexKind::Source { source } => (
             "source",
@@ -272,6 +474,7 @@ fn build_index_seed(file: &IndexFile) -> String {
         ),
     };
     let created = Utc::now().to_rfc3339();
+    let header_suffix = bucket_note.as_deref().unwrap_or("");
     format!(
         "---\n\
          type: index\n\
@@ -279,11 +482,12 @@ fn build_index_seed(file: &IndexFile) -> String {
          title: {yaml_title}\n\
          created: {created}\n\
          ---\n\n\
-         # {title}\n\n\
+         # {title}{header_suffix}\n\n\
          {description}\n\n",
         yaml_title = yaml_scalar(&title),
         created = created,
         title = title,
+        header_suffix = header_suffix,
         description = description,
     )
 }

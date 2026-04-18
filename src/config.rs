@@ -20,7 +20,8 @@ pub struct Config {
 
     /// Google AI Studio API key.
     pub api_key: String,
-    /// Base URL for the generative endpoint.
+    /// Base URL for the generative endpoint. Reserved for custom-endpoint routing.
+    #[allow(dead_code)]
     pub api_base: String,
     /// Model name for the heavy reasoner (batched text).
     pub reasoner_model: String,
@@ -33,6 +34,8 @@ pub struct Config {
     /// into sub-indexes. Smaller caps keep agent context windows small.
     pub index_entry_cap: usize,
     /// Number of leading pages to rasterize and send to the TOC extractor.
+    /// Reserved for the vision pass (TocExtractor not yet wired).
+    #[allow(dead_code)]
     pub toc_page_budget: usize,
     /// Debounce for filesystem events (Syncthing partial writes).
     pub fs_debounce: Duration,

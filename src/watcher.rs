@@ -102,8 +102,7 @@ pub fn spawn(
                     }
                 }
             }
-        })
-        .map_err(std::io::Error::from)?;
+        })?;
 
     Ok(rx)
 }

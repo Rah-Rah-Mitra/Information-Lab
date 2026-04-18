@@ -5,50 +5,43 @@ linked Obsidian knowledge graph. It's designed to run on a Raspberry Pi
 (or any low-power Linux box), use only the free tier of Google AI
 Studio, and survive reboots without losing work.
 
-Drop a PDF into the watched folder → get a titled `.md` note with
-`[[wikilinks]]`, YAML frontmatter, and a one-line entry in `INDEX.md`.
-Optionally, a research agent enriches key concepts with cited external
-context.
+Drop a PDF into the watched folder → get titled `.md` notes with
+`[[wikilinks]]`, YAML frontmatter, and hierarchical index entries under
+both a per-source axis (one textbook) and a cross-source Topics axis
+(same concept across every textbook that mentions it).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph HOST["Host (e.g. Raspberry Pi)"]
+    subgraph HOST["Host (Raspberry Pi / laptop)"]
         direction LR
-        WATCH[["watch_dir/<br/>*.pdf"]]
-        NOTIFY["notify + debouncer<br/>(watcher.rs)"]
-        INGEST["ingest.rs<br/>pdf_oxide → chunks"]
-        DB[(SQLite WAL<br/>state.db)]
-        BATCH["orchestrator.rs<br/>claim_batch"]
-        KG["KnowledgeGraphAgent<br/>(Gemma 4 31B)"]
-        RESEARCH["ResearchAgent<br/>ReAct · Gemini Flash-Lite"]
+        WATCH[["public/<br/>*.pdf (watch + vault)"]]
+        NOTIFY["watcher.rs<br/>notify + debounce + startup scan"]
+        INGEST["ingest.rs<br/>sha256 → pdf_oxide → chunks"]
+        DB[(SQLite WAL<br/>.data/state.db)]
+        ORCH["orchestrator.rs<br/>claim_batch · 30s ticker"]
+        KG["KnowledgeGraphAgent<br/>Gemma 4 31B-IT"]
         VAULT["VaultWriter<br/>vault.rs"]
-        OBSIDIAN[["vault/<br/>Generated/, INDEX.md"]]
+        STATUS["status.rs<br/>SYSTEM_STATUS.md"]
+        OBSIDIAN[["public/<br/>Index.md · Sources/ · Topics/ · Generated/"]]
     end
 
     subgraph EXT["External"]
-        GOOGLE["Google AI Studio"]
-        TAVILY["Tavily Search"]
-        OTLP["OTLP Collector<br/>(Jaeger / Tempo)"]
+        GOOGLE["Google AI Studio<br/>(15 RPM free tier)"]
+        OTLP["OTel / Jaeger<br/>localhost:4317"]
     end
 
     WATCH --> NOTIFY --> INGEST --> DB
-    DB --> BATCH --> KG
-    KG -->|structured JSON| RESEARCH
-    KG --> VAULT
-    RESEARCH --> VAULT
-    VAULT --> OBSIDIAN
+    DB --> ORCH --> KG
+    KG --> VAULT --> OBSIDIAN
+    DB --> STATUS --> OBSIDIAN
 
-    KG -. chat .-> GOOGLE
-    RESEARCH -. chat + tools .-> GOOGLE
-    RESEARCH -. web_search .-> TAVILY
-    RESEARCH -. vault_search .-> OBSIDIAN
-
+    KG -. rate-limited (governor) .-> GOOGLE
     HOST -. spans .-> OTLP
 
     classDef ext fill:#f3efe0,stroke:#b59b5e,color:#3b2f12
-    class GOOGLE,TAVILY,OTLP ext
+    class GOOGLE,OTLP ext
 ```
 
 ### Data lifecycle (single PDF)
@@ -56,115 +49,144 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     autonumber
-    participant U as User (Syncthing/copy)
+    participant U as User (copy / Syncthing)
     participant W as watcher.rs
     participant I as ingest.rs
     participant DB as SQLite
     participant O as orchestrator.rs
-    participant KG as KG Agent<br/>(Gemma)
-    participant R as Research Agent<br/>(Gemini)
+    participant KG as KG Agent<br/>(Gemma 4)
     participant V as vault.rs
     participant OB as Obsidian Vault
 
-    U->>W: drop paper.pdf
-    W->>W: debounce ~2s
+    U->>W: drop paper.pdf under public/
+    W->>W: debounce ~2s (or startup scan)
     W->>I: path event
     I->>I: sha256 + pdf_oxide extract
-    I->>DB: insert documents + chunks (state=pending)
+    I->>DB: insert document (source_name derived from folder)
+    I->>DB: insert chunks (state=pending)
     Note over O: ticker every 30s
     O->>DB: claim_batch(budget=25k tok)
     DB-->>O: N chunks (state=batched)
     O->>KG: extract(concat(chunks))
-    KG->>KG: apply skill: kg_extractor + obsidian_writer
+    KG->>KG: apply skills: kg_extractor + obsidian_writer
     KG-->>O: {title, summary, tags, entities, relationships, markdown_snippet}
-    opt TAVILY_API_KEY set
-        loop top 3 entities
-            O->>R: research(concept, hint)
-            R->>R: apply skill: researcher<br/>vault_search → web_search → web_fetch
-            R-->>O: {brief, sources}
-        end
-    end
-    O->>V: write_note(source_hint, output)
-    V->>OB: Generated/{source}/{slug}-{ts}.md
-    V->>OB: INDEX.md (append one-liner)
-    V->>OB: _folder_index.md (append one-liner)
+    O->>V: write_note(source_name, output)
+    V->>OB: Generated/{source}/{slug}-{ts}.md  (type: content)
+    V->>OB: Sources/{source}.md                (type: index)
+    V->>OB: Topics/{tag}.md  (× each tag)      (type: index, cross-source)
+    V->>OB: Index.md  (root pointer)
     O->>DB: mark_batch_done
+    O->>DB: maybe_mark_document_complete(per doc_hash)
 ```
 
-### Agentic layer
+### Agent architecture
 
-Two agents, both driven by skill files rather than inline prompts. The
-skill content is compiled into the binary via `include_str!`, so edits
-to `skills/*.md` are picked up on the next `cargo build` — no runtime
-filesystem dependency.
+A single LLM agent, driven by two skill files compiled into the binary.
+The prior deep-research / ReAct stack was removed — on the Pi, the
+governor budget is better spent on more extractions than on tool calls.
 
 ```mermaid
 flowchart TB
-    subgraph SKILLS["skills/ (compile-time)"]
-        S1[/"kg_extractor.md<br/>step-by-step extraction rules"/]
-        S2[/"obsidian_writer.md<br/>markdown conventions"/]
-        S3[/"researcher.md<br/>ReAct procedure"/]
+    subgraph SKILLS["skills/ (compile-time, include_str!)"]
+        S1[/"kg_extractor.md<br/>Gemma 4 turn format · body-only · JSON-schema-strict · skip flag"/]
+        S2[/"obsidian_writer.md<br/>markdown conventions · canonical wikilinks for cross-textbook aggregation"/]
     end
 
-    subgraph AGENTS["Runtime agents"]
-        A1["KnowledgeGraphAgent<br/>- schema-forced output<br/>- rate-limited (governor)<br/>- single-shot"]
-        A2["ResearchAgent<br/>- ReAct executor<br/>- SlidingWindow memory<br/>- ≤6 tool calls"]
+    subgraph AGENT["Runtime agent"]
+        A1["KnowledgeGraphAgent<br/>schema-forced JSON · single-shot · governor-gated (14 RPM)"]
     end
 
-    subgraph TOOLS["Tools (tools.rs)"]
-        T1["web_search<br/>Tavily"]
-        T2["web_fetch<br/>reqwest + scraper"]
-        T3["vault_search<br/>local markdown grep"]
+    subgraph RUNTIME["Runtime concerns"]
+        G["governor<br/>RateLimiter · shared quota"]
+        OT["tracing + OTel<br/>ingest · extract · write_note"]
+        DBX[(SQLite<br/>claim_batch · requeue_orphans · document_progress)]
     end
 
     S1 --> A1
     S2 --> A1
-    S3 --> A2
-
-    A2 --> T1
-    A2 --> T2
-    A2 --> T3
+    A1 --> G
+    A1 --> OT
+    A1 --> DBX
 
     classDef skill fill:#eef5ff,stroke:#4a6fa5,color:#0b254a
-    classDef tool fill:#fef5e7,stroke:#b07a2b,color:#4a2f0b
-    class S1,S2,S3 skill
-    class T1,T2,T3 tool
+    classDef rt fill:#fef5e7,stroke:#b07a2b,color:#4a2f0b
+    class S1,S2 skill
+    class G,OT,DBX rt
 ```
 
-#### Why skills?
+### Vault layout (two-axis hierarchical index)
 
-Small reasoning models (Gemma 4 31B, Gemini 3.1 Flash-Lite) behave
-dramatically better with numbered, procedural instructions than with
-free-form system prompts. Each skill file is a checklist the model
-follows mechanically — think of it as a contract with the LLM. Updating
-a skill is the supported way to change agent behavior.
+Every file under the vault carries `type: index` or `type: content` in
+frontmatter — that's the navigation signal a future agent uses to
+decide what to load. Adding a new textbook enriches both axes: the
+per-source index for that textbook *and* every topic file whose tag the
+new notes mention.
 
-## Obsidian output
+```mermaid
+flowchart TB
+    ROOT["Index.md<br/>type: index (root)"]
+    SRC["Sources/"]
+    TOP["Topics/"]
+    GEN["Generated/"]
 
-The vault layout after a few runs looks like:
+    ROOT --> SRC
+    ROOT --> TOP
 
+    subgraph S["Per-source axis"]
+        SGIS["Sources/GIS.md<br/>type: index · index_kind: source"]
+        SSTAT["Sources/Statistics.md<br/>type: index · index_kind: source"]
+    end
+
+    subgraph T["Per-topic axis (cross-source)"]
+        TKDE["Topics/kernel-density-estimation.md<br/>type: index · index_kind: topic"]
+        TPROJ["Topics/map-projections.md<br/>type: index · index_kind: topic"]
+    end
+
+    subgraph C["Content"]
+        C1["Generated/GIS/kde-on-gridded-data-20260418-120000.md<br/>type: content · tags: [kernel-density-estimation, …]"]
+        C2["Generated/Statistics/kde-bandwidth-selection-20260418-121500.md<br/>type: content · tags: [kernel-density-estimation, …]"]
+    end
+
+    SRC --> SGIS
+    SRC --> SSTAT
+    TOP --> TKDE
+    TOP --> TPROJ
+
+    SGIS --> C1
+    SSTAT --> C2
+    TKDE --> C1
+    TKDE --> C2
+
+    classDef idx fill:#eef5ff,stroke:#4a6fa5,color:#0b254a
+    classDef con fill:#e8f5e9,stroke:#2e7d32,color:#1b3a1c
+    class ROOT,SGIS,SSTAT,TKDE,TPROJ idx
+    class C1,C2 con
 ```
-vault/
-├── INDEX.md                                 ← root index (every note)
-└── Generated/
-    ├── {source-hash-or-filename}/
-    │   ├── _folder_index.md                 ← per-source index
-    │   ├── crispr-gene-drive-regulation-20260417-143022.md
-    │   └── off-target-mitigation-20260417-143055.md
-    └── {another-source}/
-        ├── _folder_index.md
-        └── …
-```
 
-`INDEX.md` entries are one line each:
+**Cap + split.** When an index file exceeds `INDEX_ENTRY_CAP` (default
+20), it's automatically split into stable alphabetical buckets
+(`a-e / f-j / k-o / p-t / u-z / other`) under a same-named sub-directory,
+and the parent becomes a pointer with `split: true` in its frontmatter.
+Bucket filenames are stable — adding entries never renames an existing
+bucket file, so Obsidian wikilinks stay valid.
 
-```markdown
-- [CRISPR Gene Drive Regulation](Generated/paper1/crispr-gene-drive-regulation-20260417-143022.md) — US regulatory framework as of 2026 covering contained labs, field trials, and mosquito releases. · #biotech #regulation #crispr
-```
+## Durable progress tracking
 
-This makes the index cheap to read — both for humans navigating the
-vault and for the `vault_search` tool the research agent uses — so
-subsequent runs don't waste tokens rediscovering what's already there.
+The `documents` table tracks per-file progress so the agent can resume
+after being stopped — it doesn't need to run 24/7.
+
+| Column | Role |
+|---|---|
+| `hash` | SHA-256; dedup + primary key |
+| `source_name` | Human-readable label (folder name under watch dir) |
+| `discovered_at` | When the file was first seen |
+| `extracted_at` | When pdf_oxide finished chunking |
+| `completed_at` | Stamped when every chunk for the doc reaches `done`/`error` |
+
+On each batch completion, `maybe_mark_document_complete(hash)` checks
+whether any `pending`/`batched` chunks remain for that document;
+if none, `completed_at` is set atomically. `SYSTEM_STATUS.md` renders
+a progress bar per document.
 
 ## Libraries
 
@@ -174,47 +196,52 @@ subsequent runs don't waste tokens rediscovering what's already there.
 | Agent orchestration + LLM backends | `autoagents`, `autoagents-derive` (Google backend) |
 | HTTP | `reqwest` (rustls) |
 | Filesystem watching | `notify`, `notify-debouncer-full` |
-| PDF extraction | `pdf_oxide` (parallel) |
-| Persistent state | `sqlx` (SQLite WAL, migrations) |
+| PDF extraction | `pdf_oxide` |
+| Persistent state | `sqlx` (SQLite WAL + migrations) |
 | Hashing | `sha2`, `hex` |
 | Rate limiting | `governor`, `nonzero_ext` |
 | Serde | `serde`, `serde_json` |
 | Config | `dotenvy` |
 | Errors | `thiserror`, `anyhow` |
 | Logging | `tracing`, `tracing-subscriber`, `tracing-appender` |
-| **OpenTelemetry** | `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry`, `opentelemetry-semantic-conventions` |
-| HTML scraping (research agent) | `scraper` |
-| Time | `chrono` |
-| IDs | `uuid` |
+| OpenTelemetry | `opentelemetry` 0.26, `opentelemetry_sdk`, `opentelemetry-otlp`, `tracing-opentelemetry` 0.27 |
+| Time / IDs | `chrono`, `uuid` |
 
 ## Configuration
 
-All configuration is env-driven (`.env` file supported via `dotenvy`).
-See [`.env.example`](.env.example) for the authoritative list. The most
-important knobs:
+Env-driven, loaded via `dotenvy`. See [`.env.example`](.env.example)
+for the authoritative list.
 
-| Var | Meaning |
-|---|---|
-| `WATCH_DIR` | Folder to watch for PDFs (Syncthing works well) |
-| `VAULT_DIR` | Obsidian vault root |
-| `GOOGLE_API_KEY` | Google AI Studio key |
-| `TAVILY_API_KEY` | Optional — enables the research agent |
-| `REASONER_MODEL` | Default: `gemma-4-31b-it` |
-| `VISION_MODEL` | Default: `gemini-3.1-flash-lite-preview` |
-| `RPM_LIMIT` | Governor bucket, default 14 (free tier is 15 RPM) |
-| `BATCH_TOKEN_TARGET` | How many token-estimates to accumulate per batch |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Enables OTel export when set |
-| `OTEL_SERVICE_NAME` | Resource attribute (`service.name`) |
-| `OTEL_RESOURCE_ATTRIBUTES` | Extra comma-separated `k=v` attrs |
+| Var | Default | Meaning |
+|---|---|---|
+| `WATCH_DIR` | `./public` | Folder to watch for PDFs |
+| `VAULT_DIR` | `./public` | Obsidian vault root (same as watch by default) |
+| `DB_PATH` | `./.data/state.db` | SQLite file; parent dir auto-created |
+| `LOG_DIR` | `./logs` | Rolling JSON log files |
+| `GOOGLE_API_KEY` | *(required)* | Google AI Studio key |
+| `REASONER_MODEL` | `gemma-4-31b-it` | Heavy reasoner for text chunks |
+| `VISION_MODEL` | `gemini-3.1-flash-lite-preview` | Reserved for TocExtractor |
+| `RPM_LIMIT` | `14` | Governor ceiling (free tier is 15 RPM) |
+| `INDEX_ENTRY_CAP` | `20` | Split threshold for index files |
+| `BATCH_TOKEN_TARGET` | `25000` | Tokens accumulated per reasoner call |
+| `FS_DEBOUNCE_MS` | `2000` | Syncthing partial-write debounce |
+| `STATUS_INTERVAL_SECS` | `300` | `SYSTEM_STATUS.md` regen cadence |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Enables OTel when set, e.g. `http://127.0.0.1:4317` |
+| `OTEL_SERVICE_NAME` | `edge-kg-agent` | Resource attribute |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Extra comma-separated `k=v` |
 
 ## Running
 
-### Local dev (Windows / macOS / Linux)
+### Local dev
 
 ```bash
-cp .env.example .env     # edit paths + API key
+cp .env.example .env     # add GOOGLE_API_KEY
 cargo run --release
 ```
+
+The sample `public/` vault ships with one GIS textbook
+(`public/GIS/Essentials of Geographic Information Systems.pdf`) —
+the startup scan picks it up and pushes it through the pipeline.
 
 ### As a systemd service (Pi)
 
@@ -233,28 +260,16 @@ Tracing is layered:
 1. **stdout** (ANSI, human) — always on.
 2. **rolling JSON file** in `$LOG_DIR` — always on.
 3. **OpenTelemetry OTLP** — on when `OTEL_EXPORTER_OTLP_ENDPOINT` is
-   set. Uses gRPC when the endpoint contains `:4317`, HTTP/protobuf
-   when it contains `:4318`.
+   set. gRPC on `:4317`, HTTP/protobuf on `:4318`.
 
-The spans you'll care about:
+First-class spans: `ingest` (per PDF) → `extract` (per batch) →
+`write_note` (per generated note).
 
-```
-ingest               (per PDF)
-  → (db writes)
-extract              (per batch — KG agent call)
-research             (per concept, when enabled)
-  → vault_search
-  → web_search
-  → web_fetch
-enrich               (parent of the above research calls)
-write_note           (per generated note)
-```
-
-Example Jaeger-compatible local setup:
+Local Jaeger (OTLP backend + UI) is provided:
 
 ```bash
-docker run --rm -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one:latest
-# then:
+cd deploy/otel
+docker compose up -d
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 cargo run --release
 # open http://localhost:16686
@@ -268,23 +283,26 @@ cargo run --release
 │   ├── main.rs             # bootstrap, signal handling
 │   ├── config.rs           # env → Config
 │   ├── telemetry.rs        # tracing + OTel wiring
-│   ├── watcher.rs          # notify → mpsc<PathBuf>
-│   ├── ingest.rs           # hash + pdf_oxide + chunk insert
-│   ├── db.rs               # sqlx SQLite access
-│   ├── agents.rs           # KG + Research agents, skill injection
-│   ├── tools.rs            # web_search, web_fetch, vault_search
-│   ├── orchestrator.rs     # glue (ingest + batch consumer)
-│   ├── vault.rs            # markdown writer + INDEX.md
-│   ├── status.rs           # periodic SYSTEM_STATUS.md
+│   ├── watcher.rs          # notify + startup scan → mpsc<PathBuf>
+│   ├── ingest.rs           # sha256 + pdf_oxide + chunk insert
+│   ├── db.rs               # sqlx SQLite access + document progress
+│   ├── agents.rs           # KnowledgeGraphAgent, skill injection
+│   ├── orchestrator.rs     # glue (ingest consumer + batch reasoner)
+│   ├── vault.rs            # two-axis index writer + cap/split
+│   ├── status.rs           # periodic SYSTEM_STATUS.md with progress bars
 │   └── error.rs            # AppError / AppResult
 ├── skills/
-│   ├── kg_extractor.md     # KG agent system prompt
-│   ├── researcher.md       # research agent procedure
-│   └── obsidian_writer.md  # markdown conventions
+│   ├── kg_extractor.md     # Gemma 4 turn-format extraction procedure
+│   └── obsidian_writer.md  # markdown + canonical-wikilink conventions
 ├── migrations/
-│   └── 0001_init.sql
+│   ├── 0001_init.sql
+│   └── 0002_document_progress.sql
+├── deploy/otel/
+│   ├── docker-compose.yml  # Jaeger all-in-one 1.76.0
+│   └── README.md
 ├── systemd/
 │   └── edge-kg-agent.service
+├── public/                 # sample vault (committed, with GIS textbook)
 ├── Cargo.toml
 └── .env.example
 ```
@@ -295,14 +313,18 @@ cargo run --release
   WAL + local vault are the system of record.
 - **Crash-safe.** `requeue_orphans()` resets any batch that was claimed
   but never finished. A PDF ingested once is never re-ingested (dedup
-  by SHA-256).
-- **Quota-aware.** `governor` enforces the RPM ceiling before we call
-  the LLM; research is serialized and capped at 3 concepts per note.
-- **Skill-driven agents.** The behavior of a small model is its prompt.
-  Change the prompt by editing a file, not by editing Rust.
+  by SHA-256). Per-document completion is stamped atomically.
+- **Quota-aware.** `governor` enforces the RPM ceiling before any LLM
+  call. Chunks are processed sequentially to keep Pi RAM flat.
+- **Skill-driven agents.** Small reasoning models behave dramatically
+  better with numbered, procedural instructions. Skills are compiled
+  into the binary via `include_str!` — edit the `.md`, rebuild, done.
+- **Canonical wikilinks.** Entities must be spelled out in full
+  (`[[Principal Component Analysis]]`, not `[[PCA]]`) so cross-textbook
+  Topic aggregation actually lines up.
 - **Observable from day one.** `tracing` everywhere; OpenTelemetry is
-  one env var away.
+  one env var away, and a local Jaeger is one `docker compose up` away.
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0
