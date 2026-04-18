@@ -4,17 +4,17 @@
     "type": "split",
     "children": [
       {
-        "id": "9afa3a01b6329e74",
+        "id": "56747f08b263ae6b",
         "type": "tabs",
         "children": [
           {
-            "id": "df4430b62363dd15",
+            "id": "a2a354d3e93cf526",
             "type": "leaf",
             "state": {
-              "type": "graph",
+              "type": "empty",
               "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "icon": "lucide-file",
+              "title": "New tab"
             }
           }
         ]
@@ -176,8 +176,11 @@
       "bases:Create new base": false
     }
   },
-  "active": "df4430b62363dd15",
+  "active": "a2a354d3e93cf526",
   "lastOpenFiles": [
+    "Generated/GIS/gis-project-management-principles-20260418-072055.md",
+    "Geospatial Artificial Intelligence Research Bibliography.md",
+    "Topics/machine-learning.md",
     "Grid-to-Ground Transformation.md",
     "Essentials of Geographic Information Systems.pdf",
     "Welcome.md"
