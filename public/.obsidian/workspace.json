@@ -11,10 +11,14 @@
             "id": "a2a354d3e93cf526",
             "type": "leaf",
             "state": {
-              "type": "empty",
-              "state": {},
+              "type": "markdown",
+              "state": {
+                "file": "Generated/D_/feature-detection-and-matching-in-computer-vision-20260418-114930.md",
+                "mode": "source",
+                "source": false
+              },
               "icon": "lucide-file",
-              "title": "New tab"
+              "title": "feature-detection-and-matching-in-computer-vision-20260418-114930"
             }
           }
         ]
@@ -178,11 +182,41 @@
   },
   "active": "a2a354d3e93cf526",
   "lastOpenFiles": [
-    "Generated/GIS/gis-project-management-principles-20260418-072055.md",
-    "Geospatial Artificial Intelligence Research Bibliography.md",
-    "Topics/machine-learning.md",
-    "Grid-to-Ground Transformation.md",
-    "Essentials of Geographic Information Systems.pdf",
-    "Welcome.md"
+    "Topics/index.md",
+    "Generated/D_/computer-vision-bibliography-and-index-20260418-120030.md",
+    "Generated/D_/computer-vision-bibliography-20260418-120009.md",
+    "Sources/D_/u-z.md",
+    "Sources/D_/p-t.md",
+    "Sources/D_/k-o.md",
+    "Sources/D_/f-j.md",
+    "Sources/D_/a-e.md",
+    "Sources/D_",
+    "Generated/D_/computer-vision-bibliography-20260418-115905.md",
+    "Topics/academic-references.md",
+    "Topics/bibliography.md",
+    "Generated/D_/computer-vision-bibliography-20260418-115803.md",
+    "Topics/software-engineering.md",
+    "Topics/computer-vision/u-z.md",
+    "Topics/computer-vision/p-t.md",
+    "Topics/computer-vision/k-o.md",
+    "Topics/computer-vision/f-j.md",
+    "Topics/computer-vision/a-e.md",
+    "Topics/computer-vision",
+    "Generated/D_/computer-vision-software-and-libraries-20260418-115730.md",
+    "Topics/numerical-methods.md",
+    "Generated/D_/matrix-decompositions-and-least-squares-20260418-115651.md",
+    "Topics/information-retrieval.md",
+    "Topics/image-retrieval.md",
+    "Generated/D_/visual-word-based-instance-recognition-20260418-115613.md",
+    "Topics/object-detection.md",
+    "Topics/face-recognition.md",
+    "Generated/D_",
+    "CV/SzeliskiBook.pdf",
+    "CV/Unconfirmed 119744.crdownload",
+    "CV",
+    "Topics",
+    "Sources",
+    "Generated/GIS",
+    "Generated"
   ]
 }

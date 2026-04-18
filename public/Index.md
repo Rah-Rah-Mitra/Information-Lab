@@ -2,7 +2,7 @@
 type: index
 index_kind: root
 title: "Information Lab"
-created: 2026-04-18T07:18:07.811415300+00:00
+created: 2026-04-18T11:35:28.440877100+00:00
 ---
 
 # Information Lab — Index
@@ -11,28 +11,74 @@ Two-axis navigation. **Sources** lists every textbook ingested; **Topics** is th
 
 ## Sources
 
+- [[D:]] (Sources/D_.md)
 - [[GIS]] (Sources/GIS.md)
 ## Topics
 
-- [[representation-learning]] — #representation-learning (Topics/representation-learning.md)
-- [[machine-learning]] — #machine-learning (Topics/machine-learning.md)
-- [[geoai]] — #geoai (Topics/geoai.md)
-- [[rag]] — #rag (Topics/rag.md)
-- [[llm]] — #llm (Topics/llm.md)
-- [[vector-databases]] — #vector-databases (Topics/vector-databases.md)
-- [[nlp]] — #nlp (Topics/nlp.md)
-- [[artificial-intelligence]] — #artificial-intelligence (Topics/artificial-intelligence.md)
+- [[index]] — #index (Topics/index.md)
+- [[academic-references]] — #academic-references (Topics/academic-references.md)
+- [[bibliography]] — #bibliography (Topics/bibliography.md)
+- [[software-engineering]] — #software-engineering (Topics/software-engineering.md)
+- [[numerical-methods]] — #numerical-methods (Topics/numerical-methods.md)
 - [[information-retrieval]] — #information-retrieval (Topics/information-retrieval.md)
+- [[image-retrieval]] — #image-retrieval (Topics/image-retrieval.md)
+- [[object-detection]] — #object-detection (Topics/object-detection.md)
+- [[face-recognition]] — #face-recognition (Topics/face-recognition.md)
+- [[pattern-recognition]] — #pattern-recognition (Topics/pattern-recognition.md)
+- [[machine-learning]] — #machine-learning (Topics/machine-learning.md)
+- [[graphics]] — #graphics (Topics/graphics.md)
+- [[image-based-rendering]] — #image-based-rendering (Topics/image-based-rendering.md)
+- [[multi-view-stereo]] — #multi-view-stereo (Topics/multi-view-stereo.md)
+- [[epipolar-geometry]] — #epipolar-geometry (Topics/epipolar-geometry.md)
+- [[stereo-vision]] — #stereo-vision (Topics/stereo-vision.md)
+- [[hdr-imaging]] — #hdr-imaging (Topics/hdr-imaging.md)
+- [[optimization]] — #optimization (Topics/optimization.md)
+- [[image-stitching]] — #image-stitching (Topics/image-stitching.md)
+- [[optical-flow]] — #optical-flow (Topics/optical-flow.md)
+- [[motion-estimation]] — #motion-estimation (Topics/motion-estimation.md)
+- [[image-registration]] — #image-registration (Topics/image-registration.md)
+- [[photogrammetry]] — #photogrammetry (Topics/photogrammetry.md)
+- [[3d-reconstruction]] — #3d-reconstruction (Topics/3d-reconstruction.md)
+- [[camera-calibration]] — #camera-calibration (Topics/camera-calibration.md)
+- [[geometric-alignment]] — #geometric-alignment (Topics/geometric-alignment.md)
+- [[image-segmentation]] — #image-segmentation (Topics/image-segmentation.md)
+- [[line-detection]] — #line-detection (Topics/line-detection.md)
+- [[feature-extraction]] — #feature-extraction (Topics/feature-extraction.md)
+- [[probabilistic-graphical-models]] — #probabilistic-graphical-models (Topics/probabilistic-graphical-models.md)
+- [[global-optimization]] — #global-optimization (Topics/global-optimization.md)
+- [[geometric-transformations]] — #geometric-transformations (Topics/geometric-transformations.md)
+- [[signal-processing]] — #signal-processing (Topics/signal-processing.md)
+- [[digital-sensors]] — #digital-sensors (Topics/digital-sensors.md)
+- [[optics]] — #optics (Topics/optics.md)
+- [[image-formation]] — #image-formation (Topics/image-formation.md)
+- [[linear-algebra]] — #linear-algebra (Topics/linear-algebra.md)
+- [[robotics]] — #robotics (Topics/robotics.md)
+- [[photometry]] — #photometry (Topics/photometry.md)
+- [[geometry]] — #geometry (Topics/geometry.md)
+- [[image-processing]] — #image-processing (Topics/image-processing.md)
+- [[embeddings]] — #embeddings (Topics/embeddings.md)
+- [[self-supervised-learning]] — #self-supervised-learning (Topics/self-supervised-learning.md)
+- [[geoai]] — #geoai (Topics/geoai.md)
+- [[quantization]] — #quantization (Topics/quantization.md)
+- [[approximate-nearest-neighbor]] — #approximate-nearest-neighbor (Topics/approximate-nearest-neighbor.md)
 - [[computer-vision]] — #computer-vision (Topics/computer-vision.md)
-- [[pmbok]] — #pmbok (Topics/pmbok.md)
+- [[computer-science]] — #computer-science (Topics/computer-science.md)
+- [[vector-databases]] — #vector-databases (Topics/vector-databases.md)
 - [[project-management]] — #project-management (Topics/project-management.md)
 - [[geoprocessing]] — #geoprocessing (Topics/geoprocessing.md)
+- [[raster-data]] — #raster-data (Topics/raster-data.md)
+- [[vector-data]] — #vector-data (Topics/vector-data.md)
 - [[database-management]] — #database-management (Topics/database-management.md)
 - [[data-acquisition]] — #data-acquisition (Topics/data-acquisition.md)
-- [[remote-sensing]] — #remote-sensing (Topics/remote-sensing.md)
 - [[data-models]] — #data-models (Topics/data-models.md)
 - [[geospatial-data]] — #geospatial-data (Topics/geospatial-data.md)
 - [[spatial-analysis]] — #spatial-analysis (Topics/spatial-analysis.md)
 - [[cartography]] — #cartography (Topics/cartography.md)
 - [[geography]] — #geography (Topics/geography.md)
 - [[gis]] — #gis (Topics/gis.md)
+## Syntheses
+
+## Bridges
+
+## Formulas
+

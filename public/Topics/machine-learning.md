@@ -2,11 +2,11 @@
 type: index
 index_kind: topic
 title: "machine-learning"
-created: 2026-04-18T10:04:06.678621500+00:00
+created: 2026-04-18T11:55:44.374018700+00:00
 ---
 
 # machine-learning
 
 Notes tagged **#machine-learning**, aggregated across every source in this library. This is the cross-textbook view of the topic.
 
-- [[Geospatial Artificial Intelligence Research Bibliography]] — A collection of academic references focusing on foundation models, representation learning, and location encoding within the field of GeoAI. · #gis #geoai #machine-learning (Generated/GIS/geospatial-artificial-intelligence-research-bibliography-20260418-100406.md)
+- [[Face and Object Recognition Techniques]] — An overview of computer vision methods for identifying faces and objects, ranging from subspace models like Eigenfaces to part-based detection and instance recognition. · #computer-vision #machine-learning #pattern-recognition (Generated/D_/face-and-object-recognition-techniques-20260418-115544.md)

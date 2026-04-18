@@ -2,11 +2,11 @@
 type: index
 index_kind: topic
 title: "geoai"
-created: 2026-04-18T10:04:06.673257100+00:00
+created: 2026-04-18T11:39:29.238945500+00:00
 ---
 
 # geoai
 
 Notes tagged **#geoai**, aggregated across every source in this library. This is the cross-textbook view of the topic.
 
-- [[Geospatial Artificial Intelligence Research Bibliography]] — A collection of academic references focusing on foundation models, representation learning, and location encoding within the field of GeoAI. · #gis #geoai #machine-learning (Generated/GIS/geospatial-artificial-intelligence-research-bibliography-20260418-100406.md)
+- [[S2Vec Geospatial Embedding Framework]] — A self-supervised framework using S2 Geometry and Masked Autoencoding to learn task-agnostic embeddings of the built environment. · #gis #geoai #self-supervised-learning (Generated/GIS/s2vec-geospatial-embedding-framework-20260418-113929.md)
