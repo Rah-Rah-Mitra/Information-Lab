@@ -26,11 +26,14 @@ pub struct Config {
     pub reasoner_model: String,
     /// Model name for the vision router (images / diagrams).
     pub vision_model: String,
-    /// Optional Tavily API key. When present, the research agent is enabled.
-    pub tavily_key: Option<String>,
 
     /// Requests-per-minute ceiling for the Token Bucket (14 RPM == 1 buffer).
     pub rpm_limit: u32,
+    /// Max one-liner entries in a single index file before it auto-splits
+    /// into sub-indexes. Smaller caps keep agent context windows small.
+    pub index_entry_cap: usize,
+    /// Number of leading pages to rasterize and send to the TOC extractor.
+    pub toc_page_budget: usize,
     /// Debounce for filesystem events (Syncthing partial writes).
     pub fs_debounce: Duration,
     /// Approximate token budget to accumulate before firing a batch.
@@ -53,9 +56,9 @@ impl Config {
         let _ = dotenvy::dotenv();
 
         Ok(Self {
-            watch_dir: env_path("WATCH_DIR")?,
-            vault_dir: env_path("VAULT_DIR")?,
-            db_path: env_path_or("DB_PATH", "./state.db"),
+            watch_dir: env_path_or("WATCH_DIR", "./public"),
+            vault_dir: env_path_or("VAULT_DIR", "./public"),
+            db_path: env_path_or("DB_PATH", "./.data/state.db"),
             log_dir: env_path_or("LOG_DIR", "./logs"),
 
             api_key: env_required("GOOGLE_API_KEY")?,
@@ -67,9 +70,10 @@ impl Config {
             reasoner_model: env_or("REASONER_MODEL", "gemma-4-31b-it"),
             // Gemini 3.1 Flash-Lite Preview — vision / image routing.
             vision_model: env_or("VISION_MODEL", "gemini-3.1-flash-lite-preview"),
-            tavily_key: std::env::var("TAVILY_API_KEY").ok().filter(|s| !s.is_empty()),
 
             rpm_limit: env_parse("RPM_LIMIT", 14)?,
+            index_entry_cap: env_parse("INDEX_ENTRY_CAP", 20_usize)?,
+            toc_page_budget: env_parse("TOC_PAGE_BUDGET", 15_usize)?,
             fs_debounce: Duration::from_millis(env_parse("FS_DEBOUNCE_MS", 2000_u64)?),
             batch_token_target: env_parse("BATCH_TOKEN_TARGET", 25_000_usize)?,
             status_interval: Duration::from_secs(env_parse("STATUS_INTERVAL_SECS", 300_u64)?),
@@ -91,10 +95,6 @@ fn env_required(key: &str) -> AppResult<String> {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn env_path(key: &str) -> AppResult<PathBuf> {
-    env_required(key).map(PathBuf::from)
 }
 
 fn env_path_or(key: &str, default: &str) -> PathBuf {

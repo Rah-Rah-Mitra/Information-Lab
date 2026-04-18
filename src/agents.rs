@@ -1,39 +1,32 @@
-//! AutoAgents-based agent layer.
+//! Agent layer.
 //!
-//! Two agents:
+//! Currently a single [`KnowledgeGraphAgent`] that turns batched PDF text into
+//! a strict KG JSON object via Gemma 4 with `StructuredOutputFormat`.
 //!
-//! * [`KnowledgeGraphAgent`] — takes a large batched text blob and emits a
-//!   strict KG JSON object. We call Gemma 4 directly via autoagents' Google
-//!   backend with `StructuredOutputFormat`, so the output is schema-enforced.
-//! * [`ResearchAgent`] — a ReAct agent with `web_search`, `web_fetch`, and
-//!   `vault_search` tools. Invoked after KG extraction to deepen entities the
-//!   reasoner surfaced.
+//! The deep-research / ReAct stack was removed — Tavily-driven enrichment and
+//! web tools are no longer part of the pipeline. The next change set will
+//! decompose this module into three single-purpose agents (TOC extractor,
+//! body extractor, index curator) on top of `adk-rust`.
 
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{num::NonZeroU32, sync::Arc};
 
-use autoagents::{
-    core::agent::{
-        memory::SlidingWindowMemory, prebuilt::executor::ReActAgent, task::Task, AgentBuilder,
-        DirectAgent,
-    },
-    llm::{
-        backends::google::Google,
-        builder::LLMBuilder,
-        chat::{ChatMessage, ChatProvider, StructuredOutputFormat},
-        LLMProvider,
-    },
-    prelude::{AgentOutputT, ToolT},
+use autoagents::llm::{
+    backends::google::Google,
+    builder::LLMBuilder,
+    chat::{ChatMessage, ChatProvider, StructuredOutputFormat},
 };
-use autoagents_derive::{AgentHooks, AgentOutput};
-use governor::{clock::DefaultClock, state::{InMemoryState, NotKeyed}, Quota, RateLimiter};
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     config::Config,
     error::{AppError, AppResult},
-    tools::{VaultSearchTool, WebFetchTool, WebSearchTool},
 };
 
 pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -98,7 +91,6 @@ fn kg_schema() -> Value {
 // ----------------------------------------------------------------------------
 
 pub const KG_EXTRACTOR_SKILL: &str = include_str!("../skills/kg_extractor.md");
-pub const RESEARCHER_SKILL: &str = include_str!("../skills/researcher.md");
 pub const OBSIDIAN_WRITER_SKILL: &str = include_str!("../skills/obsidian_writer.md");
 
 // ----------------------------------------------------------------------------
@@ -140,14 +132,9 @@ impl KnowledgeGraphAgent {
     /// Single call: rate-limited, schema-forced, parsed.
     #[tracing::instrument(level = "info", skip(self, batched_text), fields(bytes = batched_text.len(), model = %self.model))]
     pub async fn extract(&self, batched_text: &str) -> AppResult<KgOutput> {
-        // Governor: wait for a slot.
         self.limiter.until_ready().await;
 
-        // Inline the two skills as the system preamble. This gives the small
-        // model explicit, numbered instructions it can follow mechanically.
-        let system = format!(
-            "{KG_EXTRACTOR_SKILL}\n\n---\n\n{OBSIDIAN_WRITER_SKILL}"
-        );
+        let system = format!("{KG_EXTRACTOR_SKILL}\n\n---\n\n{OBSIDIAN_WRITER_SKILL}");
 
         let messages = vec![
             ChatMessage::user()
@@ -175,7 +162,6 @@ impl KnowledgeGraphAgent {
         let mut parsed: KgOutput = serde_json::from_str(&text)
             .map_err(|e| AppError::Schema(format!("parse kg json: {e} :: {}", truncate(&text, 400))))?;
 
-        // autoagents doesn't surface usage in a stable way yet — leave zero.
         parsed.tokens_sent = 0;
         parsed.tokens_received = 0;
         debug!(bytes = text.len(), "kg extraction ok");
@@ -192,152 +178,5 @@ fn truncate(s: &str, max: usize) -> String {
             cut -= 1;
         }
         format!("{}…", &s[..cut])
-    }
-}
-
-// ----------------------------------------------------------------------------
-// Research agent (ReAct + tools). Uses Gemini 3.1 Flash-Lite.
-// ----------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize, AgentOutput, Clone)]
-pub struct ResearchBrief {
-    #[output(description = "A 2–4 paragraph synthesis of external context on the concept")]
-    pub brief: String,
-    #[output(description = "Source URLs consulted")]
-    pub sources: Vec<String>,
-}
-
-impl From<autoagents::core::agent::prebuilt::executor::ReActAgentOutput> for ResearchBrief {
-    fn from(o: autoagents::core::agent::prebuilt::executor::ReActAgentOutput) -> Self {
-        // ReAct returns a string; best-effort parse, fall back to raw.
-        if let Ok(parsed) = serde_json::from_str::<ResearchBrief>(&o.response) {
-            return parsed;
-        }
-        ResearchBrief {
-            brief: o.response,
-            sources: Vec::new(),
-        }
-    }
-}
-
-/// Research agent definition. Holds tool deps so `tools()` can hand them out
-/// every time the ReAct executor asks.
-#[derive(Clone, AgentHooks)]
-pub struct ResearchAgentDef {
-    pub web_search: WebSearchTool,
-    pub web_fetch: WebFetchTool,
-    pub vault_search: VaultSearchTool,
-}
-
-// Hand-written AgentDeriveT impl (the `#[agent]` macro's tool-initializer
-// syntax can't take stateful tool instances; we need our Arc/http clones).
-impl autoagents::core::agent::AgentDeriveT for ResearchAgentDef {
-    type Output = ResearchBrief;
-
-    fn name(&self) -> &'static str {
-        "research_agent"
-    }
-
-    fn description(&self) -> &'static str {
-        // Full researcher skill is injected into the user prompt below; this
-        // description is the short blurb the ReAct executor shows to the LLM
-        // in the tool-use header. Keep it tight.
-        "Deep-research assistant that enriches knowledge-graph concepts with \
-         external context. Follows the Concept Researcher skill: vault_search \
-         first, then web_search, then web_fetch; cite every source; ≤6 calls."
-    }
-
-    fn output_schema(&self) -> Option<Value> {
-        Some(ResearchBrief::structured_output_format())
-    }
-
-    fn tools(&self) -> Vec<Box<dyn ToolT>> {
-        vec![
-            Box::new(self.web_search.clone()),
-            Box::new(self.web_fetch.clone()),
-            Box::new(self.vault_search.clone()),
-        ]
-    }
-}
-
-impl std::fmt::Debug for ResearchAgentDef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("research_agent")
-    }
-}
-
-/// Bundle of research-agent dependencies. Construct once, call per concept.
-pub struct ResearchStack {
-    llm: Arc<dyn LLMProvider>,
-    web_search: WebSearchTool,
-    web_fetch: WebFetchTool,
-    vault_search: VaultSearchTool,
-}
-
-impl ResearchStack {
-    pub fn new(cfg: &Config, tavily_key: Option<String>) -> AppResult<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(AppError::Http)?;
-
-        let llm_google: Arc<Google> = LLMBuilder::<Google>::new()
-            .api_key(cfg.api_key.clone())
-            .model(cfg.vision_model.clone()) // reuse as our fast model
-            .temperature(0.3)
-            .timeout_seconds(60)
-            .build()
-            .map_err(|e| AppError::other(format!("build Google llm: {e}")))?;
-
-        Ok(Self {
-            llm: llm_google,
-            web_search: WebSearchTool {
-                http: http.clone(),
-                api_key: tavily_key,
-            },
-            web_fetch: WebFetchTool { http },
-            vault_search: VaultSearchTool {
-                vault_dir: Arc::new(cfg.vault_dir.clone()),
-            },
-        })
-    }
-
-    /// Run the agent against a single concept and return the brief.
-    #[tracing::instrument(level = "info", skip(self, hint), fields(hint_bytes = hint.len()))]
-    pub async fn research(&self, concept: &str, hint: &str) -> AppResult<ResearchBrief> {
-        let agent_def = ResearchAgentDef {
-            web_search: self.web_search.clone(),
-            web_fetch: self.web_fetch.clone(),
-            vault_search: self.vault_search.clone(),
-        };
-        let agent = ReActAgent::new(agent_def);
-        let memory = Box::new(SlidingWindowMemory::new(8));
-
-        let handle = AgentBuilder::<_, DirectAgent>::new(agent)
-            .llm(self.llm.clone())
-            .memory(memory)
-            .build()
-            .await
-            .map_err(|e| AppError::Actor(format!("research build: {e}")))?;
-
-        let prompt = format!(
-            "{RESEARCHER_SKILL}\n\n---\n\n\
-             # Task\n\nResearch the concept: \"{concept}\".\n\n\
-             ## Context from source document\n\n{hint}\n\n\
-             Now follow the procedure above and emit the final JSON."
-        );
-        let task = Task::new(prompt);
-
-        let raw = handle
-            .agent
-            .run(task)
-            .await
-            .map_err(|e| AppError::Actor(format!("research run: {e}")))?;
-
-        let brief: ResearchBrief = raw.into();
-        if brief.sources.is_empty() {
-            warn!(concept, "research produced no sources");
-        }
-        Ok(brief)
     }
 }

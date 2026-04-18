@@ -8,17 +8,18 @@ mod ingest;
 mod orchestrator;
 mod status;
 mod telemetry;
-mod tools;
 mod vault;
 mod watcher;
 
 use std::process::ExitCode;
 
 use tokio::signal;
-use tracing::{error, info};
+#[cfg(unix)]
+use tracing::error;
+use tracing::info;
 
 use crate::{
-    agents::{KnowledgeGraphAgent, ResearchStack},
+    agents::KnowledgeGraphAgent,
     config::Config,
     db::Db,
     error::AppResult,
@@ -53,7 +54,7 @@ async fn run() -> AppResult<()> {
         reasoner = %cfg.reasoner_model,
         vision = %cfg.vision_model,
         rpm = cfg.rpm_limit,
-        research = cfg.tavily_key.is_some(),
+        index_cap = cfg.index_entry_cap,
         "starting edge-kg-agent"
     );
 
@@ -65,16 +66,9 @@ async fn run() -> AppResult<()> {
 
     // Core agents.
     let kg = KnowledgeGraphAgent::new(&cfg)?;
-    let research = match ResearchStack::new(&cfg, cfg.tavily_key.clone()) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            error!(error = %e, "research stack disabled");
-            None
-        }
-    };
     let vault = VaultWriter::new(cfg.vault_dir.clone());
 
-    let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, research, vault);
+    let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);
 
     // Status heartbeat.
     status::spawn(db.clone(), cfg.vault_dir.clone(), cfg.status_interval);

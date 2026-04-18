@@ -1,4 +1,4 @@
-//! Glue: watcher → ingest → KG extraction → (optional) research → vault write.
+//! Glue: watcher → ingest → KG extraction → vault write.
 //!
 //! Everything here is pure tokio tasks. The agents themselves live in
 //! `agents.rs`; this module only coordinates when to call them.
@@ -6,11 +6,11 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{sync::mpsc, time};
-use tracing::{error, info, instrument, warn, Instrument};
+use tracing::{error, info, warn, Instrument};
 use uuid::Uuid;
 
 use crate::{
-    agents::{KgOutput, KnowledgeGraphAgent, ResearchStack},
+    agents::KnowledgeGraphAgent,
     config::Config,
     db::{Db, UsageKind},
     ingest::{ingest_pdf, IngestOutcome},
@@ -21,7 +21,6 @@ pub struct Orchestrator {
     cfg: Config,
     db: Db,
     kg: Arc<KnowledgeGraphAgent>,
-    research: Option<Arc<ResearchStack>>,
     vault: Arc<VaultWriter>,
 }
 
@@ -30,14 +29,12 @@ impl Orchestrator {
         cfg: Config,
         db: Db,
         kg: KnowledgeGraphAgent,
-        research: Option<ResearchStack>,
         vault: VaultWriter,
     ) -> Self {
         Self {
             cfg,
             db,
             kg: Arc::new(kg),
-            research: research.map(Arc::new),
             vault: Arc::new(vault),
         }
     }
@@ -67,12 +64,10 @@ impl Orchestrator {
     }
 
     /// Spawn the batcher: every few seconds, try to claim a batch and push it
-    /// through the KG agent. If research is enabled, fan out per-concept
-    /// research calls (bounded) and append their output to the note.
+    /// through the KG agent, then write the resulting note to the vault.
     pub fn spawn_reasoner(&self) {
         let db = self.db.clone();
         let kg = self.kg.clone();
-        let research = self.research.clone();
         let vault = self.vault.clone();
         let budget = self.cfg.batch_token_target as i64;
 
@@ -82,10 +77,6 @@ impl Orchestrator {
             loop {
                 ticker.tick().await;
 
-                // Drain as long as there's pending work (governor rate-limits us anyway).
-                // Per-batch span happens inside `extract` / `enrich` / `write_note`
-                // via `#[instrument]`; the `batch_id` field is attached to each
-                // log site below so the trail is searchable either way.
                 loop {
                     let batch_id = Uuid::new_v4().to_string();
                     let chunks = match db.claim_batch(budget, &batch_id).await {
@@ -107,7 +98,6 @@ impl Orchestrator {
                         "batch claimed"
                     );
 
-                    // Assemble a single prompt with source attribution.
                     let mut user = String::with_capacity((total_tokens as usize) * 4);
                     let primary_doc_hash = chunks[0].doc_hash.clone();
                     for c in &chunks {
@@ -118,12 +108,7 @@ impl Orchestrator {
                     }
 
                     match kg.extract(&user).await {
-                        Ok(mut out) => {
-                            // Optional enrichment pass.
-                            if let Some(r) = &research {
-                                enrich(&mut out, r, &user).await;
-                            }
-
+                        Ok(out) => {
                             if let Err(e) = db
                                 .increment_usage(
                                     UsageKind::Reasoner,
@@ -156,55 +141,5 @@ impl Orchestrator {
                 }
             }
         });
-    }
-}
-
-/// Fire research at up to N top concepts and append briefs to the snippet.
-/// Serialized (not parallel) so we respect the 15 RPM shared bucket.
-#[instrument(level = "info", skip_all, fields(picks = out.entities.len()))]
-async fn enrich(out: &mut KgOutput, research: &Arc<ResearchStack>, source_hint: &str) {
-    const MAX_CONCEPTS: usize = 3;
-    let picks: Vec<String> = out.entities.iter().take(MAX_CONCEPTS).cloned().collect();
-    if picks.is_empty() {
-        return;
-    }
-
-    let hint = truncate(source_hint, 2_000);
-    let mut appended = String::new();
-
-    for concept in picks {
-        match research.research(&concept, &hint).await {
-            Ok(brief) => {
-                appended.push_str(&format!(
-                    "\n\n## Research · [[{concept}]]\n\n{}\n\n**Sources:**\n{}",
-                    brief.brief,
-                    brief
-                        .sources
-                        .iter()
-                        .map(|u| format!("- {u}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ));
-            }
-            Err(e) => {
-                warn!(concept = %concept, error = %e, "research failed");
-            }
-        }
-    }
-
-    if !appended.is_empty() {
-        out.markdown_snippet.push_str(&appended);
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut cut = max;
-        while !s.is_char_boundary(cut) && cut > 0 {
-            cut -= 1;
-        }
-        format!("{}…", &s[..cut])
     }
 }

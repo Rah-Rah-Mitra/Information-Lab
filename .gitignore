@@ -25,3 +25,13 @@ target
 
 # Local env file (use .env.example as template)
 .env
+
+# Runtime state: SQLite DB + WAL + SHM (now under .data/; old root-level
+# state.db* files from pre-0.2 deployments should be removed manually).
+.data/
+state.db
+state.db-shm
+state.db-wal
+
+# Rolling log files
+logs/

@@ -38,9 +38,6 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 autoagents = { version = "0.3", features = ["google"] }
 autoagents-derive = "0.3"
 
-# Lightweight HTML→text for research agent (used by web_fetch tool).
-scraper = "0.20"
-
 # Rate limiting
 governor = "0.6"
 nonzero_ext = "0.3"
