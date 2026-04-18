@@ -23,7 +23,17 @@ pub struct Config {
     /// Base URL for the generative endpoint. Reserved for custom-endpoint routing.
     #[allow(dead_code)]
     pub api_base: String,
-    /// Model name for the heavy reasoner (batched text).
+    /// Light-tier model (Gemma 4 26B). Used by Extractor, Harvester, and
+    /// ErrorRetrier. Has its own independent 15 RPM / 1.5K RPD bucket on
+    /// the free tier.
+    pub light_model: String,
+    /// Heavy-tier model (Gemma 4 31B). Used by Curator, Bridge, and the
+    /// derivation/theorem/report research agents. Own 15 RPM / 1.5K RPD
+    /// bucket — running both tiers doubles effective throughput.
+    pub heavy_model: String,
+    /// Backwards-compatible alias (== `heavy_model`). Kept so existing
+    /// code paths that referenced `reasoner_model` keep working.
+    #[allow(dead_code)]
     pub reasoner_model: String,
     /// Model name for the vision router (images / diagrams).
     pub vision_model: String,
@@ -124,7 +134,17 @@ impl Config {
                 "API_BASE",
                 "https://generativelanguage.googleapis.com/v1beta",
             ),
-            // Gemma 4 31B Dense — heavy reasoner (unlimited TPM, 15 RPM).
+            // Gemma 4 26B — light tier. Own 15 RPM / 1.5K RPD budget on the
+            // Google AI Studio free tier; doubles effective throughput when
+            // paired with the 31B heavy tier.
+            light_model: env_or("LIGHT_MODEL", "gemma-4-26b-it"),
+            // Gemma 4 31B Dense — heavy reasoner (15 RPM / 1.5K RPD).
+            heavy_model: env_or(
+                "HEAVY_MODEL",
+                // `REASONER_MODEL` is the deprecated name; still honored so
+                // existing .env files keep working.
+                &env_or("REASONER_MODEL", "gemma-4-31b-it"),
+            ),
             reasoner_model: env_or("REASONER_MODEL", "gemma-4-31b-it"),
             // Gemini 3.1 Flash-Lite Preview — vision / image routing.
             vision_model: env_or("VISION_MODEL", "gemini-3.1-flash-lite-preview"),
@@ -190,10 +210,17 @@ impl Config {
         })
     }
 
-    /// Effective model for a role — empty override falls back to the reasoner.
+    /// Effective model for a role — empty override falls back to the
+    /// tier default.
     pub fn model_for_role(&self, override_: &str) -> String {
+        self.model_for_override(override_, &self.heavy_model)
+    }
+
+    /// Resolve a role's model name: explicit override wins, otherwise use
+    /// the tier default passed by the caller.
+    pub fn model_for_override(&self, override_: &str, tier_default: &str) -> String {
         if override_.trim().is_empty() {
-            self.reasoner_model.clone()
+            tier_default.to_string()
         } else {
             override_.to_string()
         }

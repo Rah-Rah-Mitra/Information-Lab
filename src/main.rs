@@ -60,7 +60,8 @@ async fn run() -> AppResult<()> {
         watch = %cfg.watch_dir.display(),
         vault = %cfg.vault_dir.display(),
         db = %cfg.db_path.display(),
-        reasoner = %cfg.reasoner_model,
+        light = %cfg.light_model,
+        heavy = %cfg.heavy_model,
         vision = %cfg.vision_model,
         rpm = cfg.rpm_limit,
         index_cap = cfg.index_entry_cap,
@@ -73,14 +74,13 @@ async fn run() -> AppResult<()> {
         info!(requeued, "recovered orphaned batches from previous run");
     }
 
-    // Core agents.
-    let kg = KnowledgeGraphAgent::new(&cfg)?;
-    let vault = VaultWriter::new(cfg.vault_dir.clone(), cfg.index_entry_cap);
-
-    // Shared role-aware limiter — the only gate every non-extractor LLM
-    // call must pass through. (Extractor keeps its own governor for now;
-    // that flip lands in a follow-up change.)
+    // Shared dual-tier role-aware limiter. Every LLM call — extractor on
+    // the light tier, curator/bridge on the heavy tier — gates through this.
     let limiter = Limiter::from_config(&cfg)?;
+
+    // Core agents.
+    let kg = KnowledgeGraphAgent::new(&cfg, limiter.clone())?;
+    let vault = VaultWriter::new(cfg.vault_dir.clone(), cfg.index_entry_cap);
 
     // Research-stack agents. Each wraps its own `Arc<Google>` client
     // keyed on its role's model override, but all share `limiter`.

@@ -1,23 +1,16 @@
-//! Extractor agent: PDF chunks → strict KG JSON via Gemma 4 with
-//! `StructuredOutputFormat`.
+//! Extractor agent: PDF chunks → strict KG JSON via Gemma 4 26B (light tier)
+//! with `StructuredOutputFormat`.
 //!
-//! This is the original `KnowledgeGraphAgent`. It is kept self-contained
-//! (owns its own `governor` limiter and its own `Arc<Google>`) so that
-//! `main.rs` and `orchestrator.rs` continue to compile unchanged during
-//! the multi-agent split. A follow-up commit flips this over to the
-//! shared [`crate::limiter::Limiter`] and shared [`AgentCtx::llm`].
+//! Gates every call through the shared [`Limiter`] on `Role::Extractor`
+//! (light tier, independent 15 RPM bucket from the heavy-tier research
+//! agents).
 
-use std::{num::NonZeroU32, sync::Arc};
+use std::sync::Arc;
 
 use autoagents::llm::{
     backends::google::Google,
     builder::LLMBuilder,
     chat::{ChatMessage, ChatProvider, StructuredOutputFormat},
-};
-use governor::{
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,11 +19,10 @@ use tracing::debug;
 use crate::{
     config::Config,
     error::{AppError, AppResult},
+    limiter::{Limiter, Role},
 };
 
 use super::{truncate, KG_EXTRACTOR_SKILL, OBSIDIAN_WRITER_SKILL};
-
-type LocalGovernor = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 // ----------------------------------------------------------------------------
 // Output schema
@@ -67,7 +59,7 @@ fn kg_schema() -> Value {
         "required": ["title", "summary", "tags", "entities", "relationships", "markdown_snippet"],
         "properties": {
             "title":            { "type": "string", "description": "3–8 word Title-Case note title" },
-            "summary":          { "type": "string", "description": "Single sentence, ≤160 chars, for the index" },
+            "summary":          { "type": "string", "description": "2–3 sentence summary for the index (NOT a keyword list)" },
             "tags":             { "type": "array", "items": { "type": "string" } },
             "entities":         { "type": "array", "items": { "type": "string" } },
             "relationships": {
@@ -94,19 +86,15 @@ fn kg_schema() -> Value {
 #[derive(Clone)]
 pub struct KnowledgeGraphAgent {
     llm: Arc<Google>,
-    limiter: Arc<LocalGovernor>,
+    limiter: Arc<Limiter>,
     model: String,
 }
 
 impl KnowledgeGraphAgent {
-    pub fn new(cfg: &Config) -> AppResult<Self> {
-        let rpm = NonZeroU32::new(cfg.rpm_limit.max(1))
-            .ok_or_else(|| AppError::other("rpm must be >= 1"))?;
-        let limiter = Arc::new(RateLimiter::direct(Quota::per_minute(rpm)));
-
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
-            .model(cfg.reasoner_model.clone())
+            .model(cfg.light_model.clone())
             .temperature(0.2)
             .timeout_seconds(120)
             .build()
@@ -115,7 +103,7 @@ impl KnowledgeGraphAgent {
         Ok(Self {
             llm,
             limiter,
-            model: cfg.reasoner_model.clone(),
+            model: cfg.light_model.clone(),
         })
     }
 
@@ -124,10 +112,19 @@ impl KnowledgeGraphAgent {
         &self.model
     }
 
-    /// Single call: rate-limited, schema-forced, parsed.
-    #[tracing::instrument(level = "info", skip(self, batched_text), fields(bytes = batched_text.len(), model = %self.model))]
+    /// Single call: rate-limited through shared `Limiter`, schema-forced, parsed.
+    #[tracing::instrument(
+        level = "info",
+        skip(self, batched_text),
+        fields(
+            bytes = batched_text.len(),
+            model = %self.model,
+            agent.role = "extractor",
+            agent.tier = "light"
+        )
+    )]
     pub async fn extract(&self, batched_text: &str) -> AppResult<KgOutput> {
-        self.limiter.until_ready().await;
+        let _permit = self.limiter.admit(Role::Extractor).await?;
 
         let system = format!("{KG_EXTRACTOR_SKILL}\n\n---\n\n{OBSIDIAN_WRITER_SKILL}");
 

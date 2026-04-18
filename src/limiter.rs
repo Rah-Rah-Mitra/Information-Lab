@@ -1,13 +1,15 @@
-//! Shared LLM rate limiter.
+//! Shared dual-tier LLM rate limiter.
 //!
-//! The Google AI Studio free tier caps Gemma 4 31B at **14 safe RPM** and
-//! **1500 RPD**. One global [`governor`] limiter keeps us under the per-minute
-//! ceiling; per-role [`Semaphore`]s prevent one role from starving the others;
-//! a per-role daily counter shapes consumption against `RPD_LIMIT`.
+//! The Google AI Studio free tier gives each Gemma 4 model its own 15 RPM /
+//! 1.5K RPD bucket. Running the **light** (Gemma 4 26B) and **heavy**
+//! (Gemma 4 31B) models side-by-side therefore doubles effective throughput:
+//! each tier has its own independent [`governor`] instance, so a burst of
+//! Extractor calls on the light tier does not starve the Curator or Bridge
+//! on the heavy tier.
 //!
-//! Every LLM call in the pipeline — extractor, curator, bridge-finder,
-//! harvester fallback — **must** go through [`Limiter::admit`]. There is no
-//! secondary limiter anywhere in the codebase.
+//! Every LLM call in the pipeline **must** go through [`Limiter::admit`] —
+//! the per-tier global governor, a per-role semaphore (fair-share), and the
+//! per-role daily counter all live behind this one function.
 
 use std::{
     collections::HashMap,
@@ -28,8 +30,27 @@ use crate::{
     error::{AppError, AppResult},
 };
 
-/// Logical role of a pending LLM call. Used for semaphore fairness and
-/// per-role daily counters.
+/// Which Gemma 4 model a role runs on. Each tier has an independent RPM
+/// bucket; see module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tier {
+    /// Gemma 4 26B — lightweight, used by high-volume roles.
+    Light,
+    /// Gemma 4 31B — heavy reasoning, used by research roles.
+    Heavy,
+}
+
+impl Tier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Light => "light",
+            Tier::Heavy => "heavy",
+        }
+    }
+}
+
+/// Logical role of a pending LLM call. Used for semaphore fairness,
+/// per-role daily counters, and tier routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Role {
     Extractor,
@@ -57,6 +78,18 @@ impl Role {
             Role::Harvester => "harvester",
         }
     }
+
+    /// Which model tier this role runs on.
+    ///
+    /// Extractor and Harvester are high-volume and tolerate a smaller
+    /// context window, so they live on the Light tier. Curator and Bridge
+    /// do multi-source reasoning and stay on Heavy.
+    pub fn tier(self) -> Tier {
+        match self {
+            Role::Extractor | Role::Harvester => Tier::Light,
+            Role::Curator | Role::Bridge => Tier::Heavy,
+        }
+    }
 }
 
 type Governor = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -68,7 +101,8 @@ struct DailyCounters {
 }
 
 pub struct Limiter {
-    global: Arc<Governor>,
+    /// Per-tier global RPM gate. Independent tiers → independent buckets.
+    tier_governors: HashMap<Tier, Arc<Governor>>,
     role_sems: HashMap<Role, Arc<Semaphore>>,
     targets: HashMap<Role, u32>,
     counters: Mutex<DailyCounters>,
@@ -78,7 +112,15 @@ impl Limiter {
     pub fn from_config(cfg: &Config) -> AppResult<Arc<Self>> {
         let rpm = NonZeroU32::new(cfg.rpm_limit.max(1))
             .ok_or_else(|| AppError::other("RPM must be >= 1"))?;
-        let global = Arc::new(RateLimiter::direct(Quota::per_minute(rpm)));
+
+        // One governor per tier — independent RPM buckets.
+        let mut tier_governors: HashMap<Tier, Arc<Governor>> = HashMap::new();
+        for tier in [Tier::Light, Tier::Heavy] {
+            tier_governors.insert(
+                tier,
+                Arc::new(RateLimiter::direct(Quota::per_minute(rpm))),
+            );
+        }
 
         let rpd = cfg.rpd_limit.max(1);
         let shares = [
@@ -94,19 +136,11 @@ impl Limiter {
         for (role, share) in &shares {
             let target = (rpd as u64 * *share as u64 / sum as u64) as u32;
             targets.insert(*role, target.max(1));
-            // Small concurrency cap per role: keeps 14 RPM honest even if
-            // multiple research tasks fire simultaneously.
-            let permits = match role {
-                Role::Extractor => 1,
-                Role::Curator => 1,
-                Role::Bridge => 1,
-                Role::Harvester => 1,
-            };
-            role_sems.insert(*role, Arc::new(Semaphore::new(permits)));
+            role_sems.insert(*role, Arc::new(Semaphore::new(1)));
         }
 
         Ok(Arc::new(Self {
-            global,
+            tier_governors,
             role_sems,
             targets,
             counters: Mutex::new(DailyCounters::default()),
@@ -117,7 +151,11 @@ impl Limiter {
     /// [`Permit`] that *must* be kept alive for the duration of the call.
     /// Dropping the permit releases the role's semaphore slot but does not
     /// refund the daily counter — we debit speculatively.
-    #[instrument(level = "debug", skip(self), fields(role = role.as_str()))]
+    #[instrument(
+        level = "debug",
+        skip(self),
+        fields(role = role.as_str(), tier = role.tier().as_str())
+    )]
     pub async fn admit(&self, role: Role) -> AppResult<Permit> {
         // Daily budget check + debit.
         {
@@ -132,6 +170,7 @@ impl Limiter {
             if used >= target {
                 warn!(
                     role = role.as_str(),
+                    tier = role.tier().as_str(),
                     used,
                     target,
                     "daily role budget exhausted"
@@ -156,8 +195,12 @@ impl Limiter {
             .await
             .map_err(|e| AppError::other(format!("semaphore: {e}")))?;
 
-        // Global RPM gate.
-        self.global.until_ready().await;
+        // Tier-scoped RPM gate.
+        let gov = self
+            .tier_governors
+            .get(&role.tier())
+            .ok_or_else(|| AppError::other("unknown tier"))?;
+        gov.until_ready().await;
 
         Ok(Permit {
             _permit: _permit_guard,

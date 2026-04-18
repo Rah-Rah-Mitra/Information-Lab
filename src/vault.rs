@@ -27,8 +27,9 @@
 //! (`split: true` in frontmatter). Subsequent `upsert_index_entry` calls
 //! follow the pointer to the correct bucket. Buckets are stable — adding
 //! an entry never renames an existing bucket file, so Obsidian wikilinks
-//! stay valid. A single bucket exceeding the cap is logged as a warning
-//! (deep splitting is not implemented).
+//! stay valid. A bucket exceeding the cap is a hard error (deep-splitting
+//! is not implemented; callers must surface the failure rather than silently
+//! continue).
 
 use std::path::{Path, PathBuf};
 
@@ -41,7 +42,7 @@ use tracing::{info, instrument, warn};
 use crate::agents::bridge::BridgeNote;
 use crate::agents::curator::{Formula, TopicSynthesis};
 use crate::agents::KgOutput;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 /// One writer per vault. The mutex serialises index updates so concurrent
 /// writers can't clobber an in-progress append. The reasoner is already
@@ -498,15 +499,15 @@ async fn upsert_index_entry(
 
     if count > file.cap {
         if is_bucket_leaf(&target) {
-            warn!(
-                index = %target.display(),
-                entries = count,
-                cap = file.cap,
-                "bucket index over cap — deep-split not implemented"
-            );
-        } else {
-            split_index(&target, file).await?;
+            return Err(AppError::other(format!(
+                "index bucket overflow: {} has {} entries (cap {}); \
+                 deep-split not implemented",
+                target.display(),
+                count,
+                file.cap
+            )));
         }
+        split_index(&target, file).await?;
     }
     Ok(())
 }
