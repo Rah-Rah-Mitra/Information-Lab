@@ -44,10 +44,11 @@ impl Orchestrator {
     /// low on the Pi.
     pub fn spawn_ingest(&self, mut rx: mpsc::Receiver<PathBuf>) {
         let db = self.db.clone();
+        let watch_dir = self.cfg.watch_dir.clone();
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
                 let span = tracing::info_span!("ingest", path = %path.display());
-                match ingest_pdf(&db, &path).instrument(span).await {
+                match ingest_pdf(&db, &watch_dir, &path).instrument(span).await {
                     Ok(IngestOutcome::Ingested { hash, chunks }) => {
                         info!(%hash, chunks, "ingested");
                     }
@@ -100,6 +101,12 @@ impl Orchestrator {
 
                     let mut user = String::with_capacity((total_tokens as usize) * 4);
                     let primary_doc_hash = chunks[0].doc_hash.clone();
+                    let source_name = db
+                        .document_source_name(&primary_doc_hash)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| primary_doc_hash.clone());
                     for c in &chunks {
                         user.push_str(&format!(
                             "\n\n### Source: {} (pages {}-{})\n\n{}",
@@ -120,17 +127,41 @@ impl Orchestrator {
                                 warn!(error = %e, "usage increment failed");
                             }
 
-                            if let Err(e) = vault.write_note(&primary_doc_hash, &out).await {
+                            if let Err(e) = vault.write_note(&source_name, &out).await {
                                 error!(error = %e, "vault write failed");
                                 let _ = db
                                     .mark_batch_error(&batch_id, &format!("vault: {e}"))
                                     .await;
                                 continue;
                             }
+
+                            // Capture doc_hashes touched by this batch BEFORE
+                            // mark_batch_done flips state to 'done', so we can
+                            // check per-document completion afterwards.
+                            let touched_docs = db
+                                .batch_doc_hashes(&batch_id)
+                                .await
+                                .unwrap_or_default();
+
                             if let Err(e) = db.mark_batch_done(&batch_id).await {
                                 error!(error = %e, "mark_batch_done failed");
                             } else {
                                 info!(batch_id, "batch done");
+                                for dh in &touched_docs {
+                                    match db.maybe_mark_document_complete(dh).await {
+                                        Ok(true) => info!(
+                                            doc_hash = %dh,
+                                            source = %source_name,
+                                            "document complete"
+                                        ),
+                                        Ok(false) => {}
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            doc_hash = %dh,
+                                            "completion check failed"
+                                        ),
+                                    }
+                                }
                             }
                         }
                         Err(e) => {

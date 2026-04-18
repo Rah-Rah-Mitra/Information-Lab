@@ -66,7 +66,7 @@ async fn run() -> AppResult<()> {
 
     // Core agents.
     let kg = KnowledgeGraphAgent::new(&cfg)?;
-    let vault = VaultWriter::new(cfg.vault_dir.clone());
+    let vault = VaultWriter::new(cfg.vault_dir.clone(), cfg.index_entry_cap);
 
     let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);
 

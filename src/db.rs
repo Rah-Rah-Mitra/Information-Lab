@@ -57,17 +57,94 @@ impl Db {
         hash: &str,
         path: &str,
         byte_size: i64,
+        source_name: &str,
     ) -> AppResult<bool> {
         let rows = sqlx::query(
-            "INSERT OR IGNORE INTO documents (hash, path, byte_size) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO documents (hash, path, byte_size, source_name)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(hash)
         .bind(path)
         .bind(byte_size)
+        .bind(source_name)
         .execute(&self.pool)
         .await?
         .rows_affected();
         Ok(rows > 0)
+    }
+
+    /// Look up the human-readable source name for a document by hash.
+    pub async fn document_source_name(&self, hash: &str) -> AppResult<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT source_name FROM documents WHERE hash = ?")
+                .bind(hash)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// If all chunks for this document are in a terminal state (done/error),
+    /// stamp `completed_at`. Returns true if this call was the one that
+    /// flipped it.
+    pub async fn maybe_mark_document_complete(&self, hash: &str) -> AppResult<bool> {
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chunks
+             WHERE doc_hash = ? AND state IN ('pending', 'batched')",
+        )
+        .bind(hash)
+        .fetch_one(&self.pool)
+        .await?;
+        if remaining > 0 {
+            return Ok(false);
+        }
+        let res = sqlx::query(
+            "UPDATE documents SET completed_at = datetime('now')
+             WHERE hash = ? AND completed_at IS NULL",
+        )
+        .bind(hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Per-document progress rollup for the status page. Aggregates chunk
+    /// state on read — cheap given `idx_chunks_doc` + `idx_chunks_state`.
+    pub async fn list_document_progress(&self) -> AppResult<Vec<DocumentProgress>> {
+        let rows: Vec<DocumentProgress> = sqlx::query_as(
+            r#"
+            SELECT
+                d.hash                                                                 AS hash,
+                d.path                                                                 AS path,
+                d.source_name                                                          AS source_name,
+                d.byte_size                                                            AS byte_size,
+                d.discovered_at                                                        AS discovered_at,
+                d.completed_at                                                         AS completed_at,
+                COUNT(c.id)                                                            AS chunks_total,
+                COALESCE(SUM(CASE WHEN c.state = 'done'    THEN 1 ELSE 0 END), 0)      AS chunks_done,
+                COALESCE(SUM(CASE WHEN c.state = 'pending' THEN 1 ELSE 0 END), 0)      AS chunks_pending,
+                COALESCE(SUM(CASE WHEN c.state = 'batched' THEN 1 ELSE 0 END), 0)      AS chunks_batched,
+                COALESCE(SUM(CASE WHEN c.state = 'error'   THEN 1 ELSE 0 END), 0)      AS chunks_error
+            FROM documents d
+            LEFT JOIN chunks c ON c.doc_hash = d.hash
+            GROUP BY d.hash
+            ORDER BY d.completed_at IS NULL DESC, d.discovered_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Return the distinct doc_hashes touched by a batch (so the caller
+    /// can re-check document completion after `mark_batch_done`).
+    pub async fn batch_doc_hashes(&self, batch_id: &str) -> AppResult<Vec<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?",
+        )
+        .bind(batch_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     pub async fn mark_extracted(&self, hash: &str) -> AppResult<()> {
@@ -244,6 +321,22 @@ impl Db {
 pub enum UsageKind {
     Reasoner,
     Vision,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)] // path/byte_size/discovered_at are populated by sqlx for future status fields.
+pub struct DocumentProgress {
+    pub hash: String,
+    pub path: String,
+    pub source_name: Option<String>,
+    pub byte_size: i64,
+    pub discovered_at: String,
+    pub completed_at: Option<String>,
+    pub chunks_total: i64,
+    pub chunks_done: i64,
+    pub chunks_pending: i64,
+    pub chunks_batched: i64,
+    pub chunks_error: i64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

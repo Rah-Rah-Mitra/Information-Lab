@@ -43,10 +43,16 @@ pub async fn hash_file(path: &Path) -> AppResult<(String, u64)> {
 /// Pull per-page markdown via pdf_oxide, regroup into token-budgeted chunks,
 /// and persist to SQLite. Runs the CPU-bound extraction on a blocking thread
 /// so we don't stall the tokio runtime on the Pi's limited cores.
-pub async fn ingest_pdf(db: &Db, path: &Path) -> AppResult<IngestOutcome> {
+pub async fn ingest_pdf(db: &Db, watch_dir: &Path, path: &Path) -> AppResult<IngestOutcome> {
     let (hash, size) = hash_file(path).await?;
+    let source_name = derive_source_name(watch_dir, path);
     let inserted = db
-        .insert_document(&hash, &path.display().to_string(), size as i64)
+        .insert_document(
+            &hash,
+            &path.display().to_string(),
+            size as i64,
+            &source_name,
+        )
         .await?;
     if !inserted {
         debug!(hash = %hash, path = %path.display(), "duplicate — skipping");
@@ -137,6 +143,32 @@ async fn extract_pages_blocking(path: &Path) -> AppResult<Vec<String>> {
     })
     .await
     .map_err(|e| AppError::other(format!("join: {e}")))?
+}
+
+/// Pick a human-readable source name for this PDF. Used as the vault
+/// folder and source-index key — stable per PDF, deterministic, no hash
+/// exposure.
+///
+/// Rule: first path component under `watch_dir` if the PDF sits in a
+/// subdir (e.g. `public/GIS/foo.pdf` → `GIS`); otherwise the filename
+/// stem (e.g. `public/foo.pdf` → `foo`).
+fn derive_source_name(watch_dir: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(watch_dir).unwrap_or(path);
+    let mut comps = rel.components();
+    if let Some(first) = comps.next() {
+        if comps.next().is_some() {
+            // At least one more component remains — `first` is a dir.
+            if let Some(s) = first.as_os_str().to_str() {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 #[derive(Debug)]
