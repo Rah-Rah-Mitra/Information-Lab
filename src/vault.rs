@@ -38,6 +38,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tracing::{info, instrument, warn};
 
+use crate::agents::bridge::BridgeNote;
+use crate::agents::curator::{Formula, TopicSynthesis};
 use crate::agents::KgOutput;
 use crate::error::AppResult;
 
@@ -57,6 +59,12 @@ impl VaultWriter {
             index_entry_cap,
             index_lock: Mutex::new(()),
         }
+    }
+
+    /// Absolute path of the vault root. Used by the research drainer to
+    /// resolve `rel_path` entries from the task queue.
+    pub fn vault_dir(&self) -> &Path {
+        &self.vault_dir
     }
 
     /// Write a Markdown note under `Generated/{source}/` and update the
@@ -181,6 +189,224 @@ impl VaultWriter {
         info!(path = %content_path.display(), "note written");
         Ok(content_path)
     }
+
+    /// Write a cross-textbook synthesis note under `Generated/_Syntheses/`.
+    /// Registers the note in each of its topic indexes and in the root
+    /// `## Syntheses` section.
+    #[instrument(level = "info", skip(self, synthesis),
+        fields(topic = %synthesis.topic, formulas = synthesis.formulas.len()))]
+    pub async fn write_synthesis(
+        &self,
+        synthesis: &TopicSynthesis,
+    ) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Syntheses");
+        fs::create_dir_all(&dir).await?;
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let slug = slugify(&synthesis.topic);
+        let filename = format!("{slug}-{ts}.md");
+        let rel = format!("Generated/_Syntheses/{filename}");
+        let abs = dir.join(&filename);
+
+        let frontmatter = build_synthesis_frontmatter(synthesis);
+        let heading = format!(
+            "# Synthesis: {}\n\n*{}*\n",
+            synthesis.topic,
+            collapse_ws(&synthesis.summary)
+        );
+        let formulas_block = render_formulas_block(&synthesis.formulas);
+        let citations_block = render_citations_block(&synthesis.citations);
+        let body = format!(
+            "{frontmatter}\n\n{heading}\n{body}\n\n{formulas_block}{citations_block}",
+            body = synthesis.markdown_body,
+        );
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        for concept in synthesis.key_concepts.iter().chain(std::iter::once(&synthesis.topic)) {
+            let tag_slug = slugify(concept);
+            if tag_slug.is_empty() { continue; }
+            let topic_rel = format!("Topics/{tag_slug}.md");
+            let topic_path = self.vault_dir.join(&topic_rel);
+            if let Err(e) = upsert_index_entry(
+                &topic_path,
+                &IndexFile {
+                    kind: IndexKind::Topic { tag: concept.clone() },
+                    cap: self.index_entry_cap,
+                },
+                &IndexEntry {
+                    title: format!("Synthesis: {}", synthesis.topic),
+                    summary: synthesis.summary.clone(),
+                    rel_path: rel.clone(),
+                    tags: vec!["synthesis".to_string()],
+                },
+            ).await {
+                warn!(error = %e, topic = %concept, "synthesis topic upsert failed");
+            }
+        }
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Syntheses,
+            &rel,
+            &format!("Synthesis: {}", synthesis.topic),
+        ).await {
+            warn!(error = %e, "root Syntheses registration failed");
+        }
+        info!(path = %abs.display(), "synthesis written");
+        Ok(abs)
+    }
+
+    /// Write a Bridge note under `Generated/_Bridges/`. Registers in both
+    /// topic indexes and in the root `## Bridges` section.
+    #[instrument(level = "info", skip(self, bridge),
+        fields(a = %bridge.proposal.topic_a, b = %bridge.proposal.topic_b,
+               conf = bridge.proposal.confidence, iters = bridge.iterations))]
+    pub async fn write_bridge(&self, bridge: &BridgeNote) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Bridges");
+        fs::create_dir_all(&dir).await?;
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let a_slug = slugify(&bridge.proposal.topic_a);
+        let b_slug = slugify(&bridge.proposal.topic_b);
+        let filename = format!("{a_slug}__{b_slug}-{ts}.md");
+        let rel = format!("Generated/_Bridges/{filename}");
+        let abs = dir.join(&filename);
+
+        let frontmatter = build_bridge_frontmatter(bridge);
+        let body = format!("{frontmatter}\n\n{}\n", bridge.final_markdown);
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        for topic in [&bridge.proposal.topic_a, &bridge.proposal.topic_b] {
+            let tag_slug = slugify(topic);
+            if tag_slug.is_empty() { continue; }
+            let topic_rel = format!("Topics/{tag_slug}.md");
+            let topic_path = self.vault_dir.join(&topic_rel);
+            if let Err(e) = upsert_index_entry(
+                &topic_path,
+                &IndexFile {
+                    kind: IndexKind::Topic { tag: topic.clone() },
+                    cap: self.index_entry_cap,
+                },
+                &IndexEntry {
+                    title: format!("Bridge: {} ↔ {}",
+                        bridge.proposal.topic_a, bridge.proposal.topic_b),
+                    summary: trim_summary(&bridge.proposal.hypothesis),
+                    rel_path: rel.clone(),
+                    tags: vec!["bridge".to_string()],
+                },
+            ).await {
+                warn!(error = %e, topic = %topic, "bridge topic upsert failed");
+            }
+        }
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Bridges,
+            &rel,
+            &format!("Bridge: {} ↔ {}",
+                bridge.proposal.topic_a, bridge.proposal.topic_b),
+        ).await {
+            warn!(error = %e, "root Bridges registration failed");
+        }
+        info!(path = %abs.display(), "bridge written");
+        Ok(abs)
+    }
+
+    /// Rewrite `Formulas.md` at the vault root as a single pure table of
+    /// every known formula. Idempotent; safe to call on every harvest tick.
+    #[instrument(level = "info", skip(self, formulas), fields(n = formulas.len()))]
+    pub async fn write_formulas_index(
+        &self,
+        formulas: &[Formula],
+    ) -> AppResult<PathBuf> {
+        let rel = "Formulas.md".to_string();
+        let abs = self.vault_dir.join(&rel);
+        let mut body = String::new();
+        body.push_str("---\ntype: index\nindex_kind: formulas\n");
+        body.push_str(&format!("generated: {}\n---\n\n", Utc::now().to_rfc3339()));
+        body.push_str("# Formulas\n\n");
+        body.push_str("| Formula | Symbols | Context | Source note |\n");
+        body.push_str("|---|---|---|---|\n");
+        for f in formulas {
+            let symbols = f.symbols.join(", ");
+            let caption = f.context_caption.replace('|', "\\|").replace('\n', " ");
+            let latex = f.latex.replace('|', "\\|").replace('\n', " ");
+            body.push_str(&format!(
+                "| $${}$$ | {} | {} | [[{}]] |\n",
+                latex, symbols, caption, f.note_rel_path
+            ));
+        }
+        let mut fh = fs::File::create(&abs).await?;
+        fh.write_all(body.as_bytes()).await?;
+        fh.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Formulas,
+            &rel,
+            "Formulas",
+        ).await {
+            warn!(error = %e, "root Formulas registration failed");
+        }
+        Ok(abs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Synthesis / bridge frontmatter + helpers
+// ---------------------------------------------------------------------------
+
+fn build_synthesis_frontmatter(s: &TopicSynthesis) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("type: synthesis\n");
+    out.push_str(&format!("topic: {}\n", yaml_scalar(&s.topic)));
+    out.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+    out.push_str(&format!("summary: {}\n", yaml_scalar(&s.summary)));
+    out.push_str("sources:\n");
+    for src in &s.sources {
+        out.push_str(&format!("  - {}\n", yaml_scalar(src)));
+    }
+    out.push_str("key_concepts:\n");
+    for k in &s.key_concepts {
+        out.push_str(&format!("  - {}\n", yaml_scalar(k)));
+    }
+    out.push_str("---");
+    out
+}
+
+fn build_bridge_frontmatter(b: &BridgeNote) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("type: bridge\n");
+    out.push_str(&format!("topic_a: {}\n", yaml_scalar(&b.proposal.topic_a)));
+    out.push_str(&format!("topic_b: {}\n", yaml_scalar(&b.proposal.topic_b)));
+    out.push_str(&format!("bridge_confidence: {:.3}\n", b.proposal.confidence));
+    out.push_str(&format!("iterations: {}\n", b.iterations));
+    out.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+    out.push_str("---");
+    out
+}
+
+fn render_formulas_block(fs: &[Formula]) -> String {
+    if fs.is_empty() { return String::new(); }
+    let mut s = String::from("\n## Formulas\n\n");
+    for f in fs {
+        s.push_str(&format!("- $${}$$ — {}\n", f.latex, f.context_caption));
+    }
+    s
+}
+
+fn render_citations_block(cs: &[crate::agents::curator::Citation]) -> String {
+    if cs.is_empty() { return String::new(); }
+    let mut s = String::from("\n## Citations\n\n");
+    for c in cs {
+        s.push_str(&format!("- [[{}]] — {}\n", c.note_rel_path, c.source));
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +749,9 @@ fn render_entry_line(entry: &IndexEntry) -> String {
 enum RootSection {
     Sources,
     Topics,
+    Syntheses,
+    Bridges,
+    Formulas,
 }
 
 /// Add a link under the given root section if not already present. The root
@@ -550,6 +779,9 @@ async fn register_root_link(
     let header = match section {
         RootSection::Sources => "## Sources",
         RootSection::Topics => "## Topics",
+        RootSection::Syntheses => "## Syntheses",
+        RootSection::Bridges => "## Bridges",
+        RootSection::Formulas => "## Formulas",
     };
     let line = match section {
         RootSection::Sources => {
@@ -557,6 +789,11 @@ async fn register_root_link(
         }
         RootSection::Topics => {
             format!("- [[{display}]] — #{display} ({rel_path})")
+        }
+        RootSection::Syntheses
+        | RootSection::Bridges
+        | RootSection::Formulas => {
+            format!("- [[{display}]] ({rel_path})")
         }
     };
 
@@ -581,7 +818,10 @@ fn build_root_seed() -> String {
          **Topics** is the cross-source view — one file per tag, containing \
          every note that uses it regardless of which textbook it came from.\n\n\
          ## Sources\n\n\
-         ## Topics\n\n",
+         ## Topics\n\n\
+         ## Syntheses\n\n\
+         ## Bridges\n\n\
+         ## Formulas\n\n",
         created = Utc::now().to_rfc3339(),
     )
 }

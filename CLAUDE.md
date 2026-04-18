@@ -7,9 +7,11 @@ session.
 ## What this project is
 
 `edge-kg-agent` is a Rust daemon that watches a folder for PDFs and
-writes an Obsidian knowledge graph. It runs on a Raspberry Pi on the
-free tier of Google AI Studio. Anything you do has to respect those
-constraints:
+writes an Obsidian knowledge graph, then runs a research layer on top
+(Curator, BridgeFinder, FormulaHarvester, LiteratureSearch) that
+synthesises and bridges topics across textbooks. It runs on a Raspberry
+Pi on the free tier of Google AI Studio. Anything you do has to respect
+those constraints:
 
 - **RAM is tight.** Prefer streaming over buffering. Chunks are
   processed sequentially, not in parallel.
@@ -129,9 +131,41 @@ trace tree stays useful. Current first-class spans:
 - `ingest` (per PDF, via watcher → orchestrator)
 - `extract` (per batch, KG agent call)
 - `write_note` (per generated note)
+- `curate` / `bridge.iterate` / `bridge.propose` / `bridge.critique`
+  (research layer)
+- `harvest` / `scheduler.tick` / `limiter.admit` / `search.tavily`
 
-The deep-research / enrich / research spans were removed alongside the
-Tavily stack.
+## Multi-agent research layer
+
+Five agents, all gated through a single shared `Limiter` (global
+governor + per-role semaphore + per-role daily counter shaped against
+`RPD_LIMIT`, default 1500):
+
+- **ExtractorAgent** (`src/agents/extractor.rs`) — PDF chunks → KG notes.
+  Still owns its own governor for now; all other agents use the shared
+  `Limiter`.
+- **TopicCuratorAgent** (`src/agents/curator.rs`) — on topic growth ≥
+  `CURATE_DELTA_K`, synthesises a cross-source note into
+  `Generated/_Syntheses/`.
+- **BridgeFinderAgent** (`src/agents/bridge.rs`) — 3-iteration loop
+  (propose → Tavily-refine → critique); emits to `Generated/_Bridges/`
+  when `confidence ≥ BRIDGE_CONFIDENCE_TAU` (0.72).
+- **LiteratureSearchAgent** (`src/agents/search.rs`) — Tavily client
+  restricted to six academic domains; monthly cap via `search_usage`.
+  Only called from Bridge iter 2. Do NOT resurrect the old ReAct/Tavily
+  orchestrator paths.
+- **FormulaHarvesterAgent** (`src/agents/harvester.rs`) — regex-first
+  scan of `Generated/**.md`; LLM fallback only for ambiguous blocks.
+  Rewrites `Formulas.md` at vault root.
+
+Daily role shares default to 60/20/15/5 (Extractor/Curator/Bridge/
+Harvester). Mid-band bridge selection lives in
+`scheduler.rs::sample_bridge_candidates` — cross-source only, entity
+overlap in `[BRIDGE_MIN_OVERLAP, BRIDGE_MAX_OVERLAP]`, jaccard ≤ τ.
+
+Skills: `skills/topic_curator.md`, `skills/bridge_finder.md`,
+`skills/bridge_search_refine.md`, `skills/formula_harvester.md`. All
+compiled in via `include_str!`.
 
 ## Don't
 

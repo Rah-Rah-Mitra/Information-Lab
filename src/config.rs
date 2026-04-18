@@ -51,6 +51,61 @@ pub struct Config {
     pub otel_service_name: String,
     /// Additional resource attributes, comma-separated `k=v` pairs.
     pub otel_resource_attributes: Option<String>,
+
+    // -----------------------------------------------------------------------
+    // Multi-agent research layer.
+    // -----------------------------------------------------------------------
+    /// Daily request ceiling across all roles (Gemma 4 31B free tier = 1500).
+    pub rpd_limit: u32,
+    /// Daily role share, integer percent; these four should sum to 100.
+    pub role_share_extractor: u32,
+    pub role_share_curator: u32,
+    pub role_share_bridge: u32,
+    pub role_share_harvester: u32,
+
+    /// Minimum new entries in a Topic index before a curate task is enqueued.
+    pub curate_delta_k: usize,
+    /// Maximum Bridge tasks sitting in the queue before the scheduler stops
+    /// enqueuing more candidate pairs.
+    pub bridge_max_pending: usize,
+    /// Hard cap on the propose → search → critique loop.
+    pub bridge_max_iters: u8,
+    /// Accept a bridge as soon as its confidence crosses this threshold.
+    pub bridge_confidence_tau: f32,
+    /// Mid-band overlap filter for Bridge candidate selection (entity count).
+    pub bridge_min_overlap: usize,
+    pub bridge_max_overlap: usize,
+    /// Upper bound on entity Jaccard similarity. Above this, two topics are
+    /// treated as near-duplicates (no bridge is interesting).
+    pub bridge_max_jaccard: f32,
+
+    /// Enqueue a Harvest task every N newly-written notes.
+    #[allow(dead_code)]
+    pub harvest_every_n: usize,
+    /// Idle scheduler tick.
+    pub scheduler_interval: Duration,
+    /// Research tick (curator + bridge in parallel).
+    pub research_interval: Duration,
+
+    /// Overrides for per-role models. Blank falls back to `reasoner_model`.
+    pub curator_model: String,
+    pub bridge_model: String,
+
+    // ---- Tavily literature search (used only by Bridge iter 2) ----
+    /// API key; blank disables the search agent entirely.
+    pub tavily_api_key: Option<String>,
+    /// Vendor monthly ceiling.
+    pub tavily_monthly_limit: u32,
+    /// Soft per-day cap = monthly / 30 rounded.
+    #[allow(dead_code)]
+    pub tavily_daily_soft_cap: u32,
+    /// Calls allowed per Bridge run.
+    #[allow(dead_code)]
+    pub tavily_per_bridge_cap: u32,
+    /// Allow-listed academic domains (comma-separated in env).
+    pub tavily_domains: Vec<String>,
+    /// Results requested per Tavily call.
+    pub tavily_max_results: u8,
 }
 
 impl Config {
@@ -88,7 +143,60 @@ impl Config {
             otel_resource_attributes: std::env::var("OTEL_RESOURCE_ATTRIBUTES")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+
+            rpd_limit: env_parse("RPD_LIMIT", 1500_u32)?,
+            role_share_extractor: env_parse("ROLE_SHARE_EXTRACTOR", 60_u32)?,
+            role_share_curator: env_parse("ROLE_SHARE_CURATOR", 20_u32)?,
+            role_share_bridge: env_parse("ROLE_SHARE_BRIDGE", 15_u32)?,
+            role_share_harvester: env_parse("ROLE_SHARE_HARVESTER", 5_u32)?,
+
+            curate_delta_k: env_parse("CURATE_DELTA_K", 5_usize)?,
+            bridge_max_pending: env_parse("BRIDGE_MAX_PENDING", 6_usize)?,
+            bridge_max_iters: env_parse("BRIDGE_MAX_ITERS", 3_u8)?,
+            bridge_confidence_tau: env_parse("BRIDGE_CONFIDENCE_TAU", 0.72_f32)?,
+            bridge_min_overlap: env_parse("BRIDGE_MIN_OVERLAP", 1_usize)?,
+            bridge_max_overlap: env_parse("BRIDGE_MAX_OVERLAP", 5_usize)?,
+            bridge_max_jaccard: env_parse("BRIDGE_MAX_JACCARD", 0.6_f32)?,
+
+            harvest_every_n: env_parse("HARVEST_EVERY_N", 25_usize)?,
+            scheduler_interval: Duration::from_secs(env_parse(
+                "SCHEDULER_INTERVAL_SECS",
+                60_u64,
+            )?),
+            research_interval: Duration::from_secs(env_parse(
+                "RESEARCH_INTERVAL_SECS",
+                30_u64,
+            )?),
+
+            curator_model: env_or("CURATOR_MODEL", ""),
+            bridge_model: env_or("BRIDGE_MODEL", ""),
+
+            tavily_api_key: std::env::var("TAVILY_API_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            tavily_monthly_limit: env_parse("TAVILY_MONTHLY_LIMIT", 1000_u32)?,
+            tavily_daily_soft_cap: env_parse("TAVILY_DAILY_SOFT_CAP", 33_u32)?,
+            tavily_per_bridge_cap: env_parse("TAVILY_PER_BRIDGE_CAP", 1_u32)?,
+            tavily_domains: env_or(
+                "TAVILY_DOMAINS",
+                "arxiv.org,semanticscholar.org,dl.acm.org,\
+                 link.springer.com,nature.com,sciencedirect.com",
+            )
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+            tavily_max_results: env_parse("TAVILY_MAX_RESULTS", 5_u8)?,
         })
+    }
+
+    /// Effective model for a role — empty override falls back to the reasoner.
+    pub fn model_for_role(&self, override_: &str) -> String {
+        if override_.trim().is_empty() {
+            self.reasoner_model.clone()
+        } else {
+            override_.to_string()
+        }
     }
 }
 

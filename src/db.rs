@@ -243,15 +243,268 @@ impl Db {
         Ok(())
     }
 
-    /// Reset chunks that were claimed but never finished (crash recovery).
+    /// Reset chunks and agent tasks that were claimed but never finished
+    /// (crash recovery). Called once on startup.
     pub async fn requeue_orphans(&self) -> AppResult<u64> {
-        let res = sqlx::query(
+        let chunks_reset = sqlx::query(
             "UPDATE chunks SET state = 'pending', batch_id = NULL
              WHERE state = 'batched'",
         )
         .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        let tasks_reset = sqlx::query(
+            "UPDATE agent_tasks SET state = 'pending', batch_id = NULL
+             WHERE state = 'running'",
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        Ok(chunks_reset + tasks_reset)
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent-task queue (Curate / Bridge / Harvest — Extract stays chunk-based)
+    // -----------------------------------------------------------------------
+
+    pub async fn enqueue_agent_task(
+        &self,
+        kind: AgentTaskKind,
+        payload: &serde_json::Value,
+    ) -> AppResult<i64> {
+        let id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO agent_tasks (kind, payload) VALUES (?, ?) RETURNING id",
+        )
+        .bind(kind.as_str())
+        .bind(payload.to_string())
+        .fetch_one(&self.pool)
         .await?;
-        Ok(res.rows_affected())
+        Ok(id)
+    }
+
+    /// Claim a single pending task of the given kind, flipping it to running.
+    /// Returns `None` when the queue is empty for that kind.
+    pub async fn claim_agent_task(
+        &self,
+        kind: AgentTaskKind,
+        batch_id: &str,
+    ) -> AppResult<Option<AgentTaskRow>> {
+        let mut tx = self.pool.begin().await?;
+        let row: Option<AgentTaskRow> = sqlx::query_as(
+            "SELECT id, kind, payload, state, batch_id, last_error,
+                    created_at, completed_at
+             FROM agent_tasks
+             WHERE state = 'pending' AND kind = ?
+             ORDER BY id LIMIT 1",
+        )
+        .bind(kind.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(task) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        sqlx::query(
+            "UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?",
+        )
+        .bind(batch_id)
+        .bind(task.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(task))
+    }
+
+    pub async fn finish_agent_task(&self, id: i64) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE agent_tasks SET state = 'done',
+                completed_at = datetime('now') WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_agent_task(&self, id: i64, err: &str) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE agent_tasks SET state = 'error', last_error = ?,
+                completed_at = datetime('now') WHERE id = ?",
+        )
+        .bind(err)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn agent_task_pending_count(
+        &self,
+        kind: AgentTaskKind,
+    ) -> AppResult<i64> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_tasks
+             WHERE kind = ? AND state IN ('pending','running')",
+        )
+        .bind(kind.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
+    // -----------------------------------------------------------------------
+    // Topic snapshots — scheduler uses delta-vs-snapshot to decide curation.
+    // -----------------------------------------------------------------------
+
+    pub async fn topic_snapshot(&self, topic: &str) -> AppResult<Option<i64>> {
+        Ok(sqlx::query_scalar(
+            "SELECT entry_count FROM topic_snapshots WHERE topic = ?",
+        )
+        .bind(topic)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn upsert_topic_snapshot(
+        &self,
+        topic: &str,
+        entry_count: i64,
+        mark_curated: bool,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO topic_snapshots (topic, entry_count, last_curated_at, last_snapshot_at)
+             VALUES (?, ?, CASE WHEN ? THEN datetime('now') ELSE NULL END, datetime('now'))
+             ON CONFLICT(topic) DO UPDATE SET
+                 entry_count = excluded.entry_count,
+                 last_snapshot_at = datetime('now'),
+                 last_curated_at = CASE WHEN ? THEN datetime('now') ELSE last_curated_at END",
+        )
+        .bind(topic)
+        .bind(entry_count)
+        .bind(mark_curated)
+        .bind(mark_curated)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Bridges — avoid re-proposing the same cross-source pair.
+    // -----------------------------------------------------------------------
+
+    pub async fn bridge_exists(
+        &self,
+        topic_a: &str,
+        topic_b: &str,
+        source_a: &str,
+        source_b: &str,
+    ) -> AppResult<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM bridges
+             WHERE topic_a = ? AND topic_b = ? AND source_a = ? AND source_b = ?",
+        )
+        .bind(topic_a)
+        .bind(topic_b)
+        .bind(source_a)
+        .bind(source_b)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_bridge(
+        &self,
+        topic_a: &str,
+        topic_b: &str,
+        source_a: &str,
+        source_b: &str,
+        confidence: f32,
+        iterations: i64,
+        note_rel_path: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO bridges
+             (topic_a, topic_b, source_a, source_b, confidence, iterations, note_rel_path)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(topic_a)
+        .bind(topic_b)
+        .bind(source_a)
+        .bind(source_b)
+        .bind(confidence)
+        .bind(iterations)
+        .bind(note_rel_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Formula corpus.
+    // -----------------------------------------------------------------------
+
+    pub async fn upsert_formula(
+        &self,
+        latex_norm: &str,
+        latex: &str,
+        symbols: &str,
+        context: &str,
+        note_rel_path: &str,
+    ) -> AppResult<bool> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO formulas
+             (latex_norm, latex, symbols, context, note_rel_path)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(latex_norm)
+        .bind(latex)
+        .bind(symbols)
+        .bind(context)
+        .bind(note_rel_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    pub async fn list_formulas(&self) -> AppResult<Vec<FormulaRow>> {
+        Ok(sqlx::query_as(
+            "SELECT id, latex_norm, latex, symbols, context, note_rel_path, first_seen_at
+             FROM formulas ORDER BY first_seen_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tavily monthly budget.
+    // -----------------------------------------------------------------------
+
+    pub async fn search_usage_this_month(&self) -> AppResult<i64> {
+        let month = Utc::now().format("%Y-%m").to_string();
+        Ok(sqlx::query_scalar(
+            "SELECT calls FROM search_usage WHERE month = ?",
+        )
+        .bind(&month)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or(0))
+    }
+
+    pub async fn increment_search_usage(&self) -> AppResult<()> {
+        let month = Utc::now().format("%Y-%m").to_string();
+        sqlx::query(
+            "INSERT INTO search_usage (month, calls, last_call_at)
+             VALUES (?, 1, datetime('now'))
+             ON CONFLICT(month) DO UPDATE SET
+                 calls = calls + 1, last_call_at = datetime('now')",
+        )
+        .bind(&month)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn pending_count(&self) -> AppResult<i64> {
@@ -281,6 +534,10 @@ impl Db {
         let col = match kind {
             UsageKind::Reasoner => "reasoner_calls",
             UsageKind::Vision => "vision_calls",
+            UsageKind::Curator => "curator_calls",
+            UsageKind::Bridge => "bridge_calls",
+            UsageKind::Harvester => "harvester_calls",
+            UsageKind::Search => "search_calls",
         };
         // sqlx doesn't parameterize column names; we built `col` from a closed enum above.
         let sql = format!(
@@ -321,6 +578,10 @@ impl Db {
 pub enum UsageKind {
     Reasoner,
     Vision,
+    Curator,
+    Bridge,
+    Harvester,
+    Search,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -353,4 +614,46 @@ impl From<std::num::TryFromIntError> for AppError {
     fn from(e: std::num::TryFromIntError) -> Self {
         AppError::other(format!("int conversion: {e}"))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AgentTaskKind {
+    Curate,
+    Bridge,
+    Harvest,
+}
+
+impl AgentTaskKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentTaskKind::Curate => "Curate",
+            AgentTaskKind::Bridge => "Bridge",
+            AgentTaskKind::Harvest => "Harvest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct AgentTaskRow {
+    pub id: i64,
+    pub kind: String,
+    pub payload: String,
+    pub state: String,
+    pub batch_id: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct FormulaRow {
+    pub id: i64,
+    pub latex_norm: String,
+    pub latex: String,
+    pub symbols: Option<String>,
+    pub context: Option<String>,
+    pub note_rel_path: String,
+    pub first_seen_at: String,
 }

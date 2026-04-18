@@ -1,12 +1,11 @@
-//! Agent layer.
+//! Extractor agent: PDF chunks → strict KG JSON via Gemma 4 with
+//! `StructuredOutputFormat`.
 //!
-//! Currently a single [`KnowledgeGraphAgent`] that turns batched PDF text into
-//! a strict KG JSON object via Gemma 4 with `StructuredOutputFormat`.
-//!
-//! The deep-research / ReAct stack was removed — Tavily-driven enrichment and
-//! web tools are no longer part of the pipeline. The next change set will
-//! decompose this module into three single-purpose agents (TOC extractor,
-//! body extractor, index curator) on top of `adk-rust`.
+//! This is the original `KnowledgeGraphAgent`. It is kept self-contained
+//! (owns its own `governor` limiter and its own `Arc<Google>`) so that
+//! `main.rs` and `orchestrator.rs` continue to compile unchanged during
+//! the multi-agent split. A follow-up commit flips this over to the
+//! shared [`crate::limiter::Limiter`] and shared [`AgentCtx::llm`].
 
 use std::{num::NonZeroU32, sync::Arc};
 
@@ -29,7 +28,9 @@ use crate::{
     error::{AppError, AppResult},
 };
 
-pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+use super::{truncate, KG_EXTRACTOR_SKILL, OBSIDIAN_WRITER_SKILL};
+
+type LocalGovernor = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 // ----------------------------------------------------------------------------
 // Output schema
@@ -87,20 +88,13 @@ fn kg_schema() -> Value {
 }
 
 // ----------------------------------------------------------------------------
-// Skill prompts — compiled into the binary; see `skills/*.md`.
-// ----------------------------------------------------------------------------
-
-pub const KG_EXTRACTOR_SKILL: &str = include_str!("../skills/kg_extractor.md");
-pub const OBSIDIAN_WRITER_SKILL: &str = include_str!("../skills/obsidian_writer.md");
-
-// ----------------------------------------------------------------------------
 // Knowledge graph extractor (schema-forced single-shot call)
 // ----------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct KnowledgeGraphAgent {
     llm: Arc<Google>,
-    limiter: Arc<Limiter>,
+    limiter: Arc<LocalGovernor>,
     model: String,
 }
 
@@ -167,17 +161,5 @@ impl KnowledgeGraphAgent {
         parsed.tokens_received = 0;
         debug!(bytes = text.len(), "kg extraction ok");
         Ok(parsed)
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut cut = max;
-        while !s.is_char_boundary(cut) && cut > 0 {
-            cut -= 1;
-        }
-        format!("{}…", &s[..cut])
     }
 }

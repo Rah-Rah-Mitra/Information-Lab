@@ -5,11 +5,14 @@ mod config;
 mod db;
 mod error;
 mod ingest;
+mod limiter;
 mod orchestrator;
+mod scheduler;
 mod status;
 mod telemetry;
 mod vault;
 mod watcher;
+mod workflow;
 
 use std::process::ExitCode;
 
@@ -19,11 +22,17 @@ use tracing::error;
 use tracing::info;
 
 use crate::{
-    agents::KnowledgeGraphAgent,
+    agents::{
+        bridge::BridgeFinderAgent, curator::TopicCuratorAgent,
+        harvester::FormulaHarvesterAgent, search::LiteratureSearchAgent,
+        KnowledgeGraphAgent,
+    },
     config::Config,
     db::Db,
     error::AppResult,
+    limiter::Limiter,
     orchestrator::Orchestrator,
+    scheduler::Scheduler,
     vault::VaultWriter,
 };
 
@@ -68,6 +77,21 @@ async fn run() -> AppResult<()> {
     let kg = KnowledgeGraphAgent::new(&cfg)?;
     let vault = VaultWriter::new(cfg.vault_dir.clone(), cfg.index_entry_cap);
 
+    // Shared role-aware limiter — the only gate every non-extractor LLM
+    // call must pass through. (Extractor keeps its own governor for now;
+    // that flip lands in a follow-up change.)
+    let limiter = Limiter::from_config(&cfg)?;
+
+    // Research-stack agents. Each wraps its own `Arc<Google>` client
+    // keyed on its role's model override, but all share `limiter`.
+    let search_agent = LiteratureSearchAgent::new(&cfg, db.clone())?;
+    let curator_agent = TopicCuratorAgent::new(&cfg, limiter.clone())?;
+    let bridge_agent =
+        BridgeFinderAgent::new(&cfg, limiter.clone(), search_agent)?;
+    let harvester_agent =
+        FormulaHarvesterAgent::new(cfg.vault_dir.clone(), db.clone())?;
+    let scheduler = Scheduler::new(cfg.clone(), db.clone())?;
+
     let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);
 
     // Status heartbeat.
@@ -77,6 +101,9 @@ async fn run() -> AppResult<()> {
     let rx = watcher::spawn(cfg.watch_dir.clone(), cfg.fs_debounce)?;
     orch.spawn_ingest(rx);
     orch.spawn_reasoner();
+    orch.spawn_research(curator_agent, bridge_agent);
+    orch.spawn_harvester(harvester_agent);
+    orch.spawn_idle_scheduler(scheduler);
 
     shutdown_signal().await;
     info!("shutdown signal received");
