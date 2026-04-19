@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod curator;
 pub mod derivation;
 pub mod extractor;
+pub mod formula_extractor;
 pub mod harvester;
 pub mod report;
 pub mod retrier;

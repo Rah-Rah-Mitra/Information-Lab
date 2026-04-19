@@ -75,6 +75,14 @@ pub struct Config {
     pub role_share_theorem: u32,
     pub role_share_derivation: u32,
     pub role_share_report: u32,
+    pub role_share_formula: u32,
+
+    /// Minimum math-density score a chunk must reach before a
+    /// `FormulaExtract` task is enqueued against it. Values in `[0.0, 1.0]`;
+    /// see [`crate::formula_detect::math_density_score`].
+    pub formula_detect_tau: f32,
+    /// Per-role model override for the formula extractor (light tier).
+    pub formula_model: String,
 
     /// Minimum new entries in a Topic index before a curate task is enqueued.
     pub curate_delta_k: usize,
@@ -197,6 +205,9 @@ impl Config {
             role_share_theorem: env_parse("ROLE_SHARE_THEOREM", 8_u32)?,
             role_share_derivation: env_parse("ROLE_SHARE_DERIVATION", 7_u32)?,
             role_share_report: env_parse("ROLE_SHARE_REPORT", 3_u32)?,
+            role_share_formula: env_parse("ROLE_SHARE_FORMULA", 10_u32)?,
+            formula_detect_tau: env_parse("FORMULA_DETECT_TAU", 0.12_f32)?,
+            formula_model: env_or("FORMULA_MODEL", ""),
 
             curate_delta_k: env_parse("CURATE_DELTA_K", 5_usize)?,
             bridge_max_pending: env_parse("BRIDGE_MAX_PENDING", 6_usize)?,

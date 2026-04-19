@@ -46,6 +46,9 @@ fn test_cfg() -> Config {
         role_share_theorem: 8,
         role_share_derivation: 7,
         role_share_report: 3,
+        role_share_formula: 10,
+        formula_detect_tau: 0.12,
+        formula_model: String::new(),
 
         curate_delta_k: 5,
         bridge_max_pending: 6,

@@ -14,6 +14,7 @@ use crate::{
         bridge::{BridgeFinderAgent, TopicPair},
         curator::{Formula, NoteRef, TopicCuratorAgent},
         derivation::DerivationChainAgent,
+        formula_extractor::FormulaExtractorAgent,
         harvester::FormulaHarvesterAgent,
         report::{ReportInput, ReportWriterAgent},
         retrier::ErrorRetrierAgent,
@@ -55,10 +56,11 @@ impl Orchestrator {
     pub fn spawn_ingest(&self, mut rx: mpsc::Receiver<PathBuf>) {
         let db = self.db.clone();
         let watch_dir = self.cfg.watch_dir.clone();
+        let tau = self.cfg.formula_detect_tau;
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
                 let span = tracing::info_span!("ingest", path = %path.display());
-                match ingest_pdf(&db, &watch_dir, &path).instrument(span).await {
+                match ingest_pdf(&db, &watch_dir, &path, tau).instrument(span).await {
                     Ok(IngestOutcome::Ingested { hash, chunks }) => {
                         info!(%hash, chunks, "ingested");
                     }
@@ -357,6 +359,26 @@ impl Orchestrator {
                 }
                 if let Err(e) = rr {
                     warn!(error = %e, "report drain failed");
+                }
+            }
+        });
+    }
+
+    /// Light-tier formula extractor drain. Each tick pulls one
+    /// `FormulaExtract` task (enqueued by `ingest.rs` when the math-density
+    /// heuristic flagged a chunk), calls the LLM, and upserts every
+    /// salvaged formula into the shared `formulas` corpus. The downstream
+    /// harvester/curator then see them like any regex-discovered formula.
+    pub fn spawn_formula_extractor(&self, agent: FormulaExtractorAgent) {
+        let db = self.db.clone();
+        let interval = self.cfg.research_interval;
+        tokio::spawn(async move {
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = drain_formula_extract(&db, &agent).await {
+                    warn!(error = %e, "formula_extract drain failed");
                 }
             }
         });
@@ -718,6 +740,90 @@ async fn drain_report(
     Ok(())
 }
 
+async fn drain_formula_extract(
+    db: &Db,
+    agent: &FormulaExtractorAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::FormulaExtract, &batch_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    info!(
+        target: "agent.spawn",
+        role = "formula_extractor",
+        tier = "light",
+        task_id = task.id,
+        "formula_extract claimed"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let chunk_id = payload.get("chunk_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let source_name = payload
+        .get("source_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    if chunk_id == 0 {
+        db.fail_agent_task(task.id, "formula_extract: missing chunk_id")
+            .await?;
+        return Ok(());
+    }
+    let Some(content) = db.get_chunk_content(chunk_id).await? else {
+        db.fail_agent_task(task.id, "formula_extract: chunk not found")
+            .await?;
+        return Ok(());
+    };
+
+    match agent.extract(&content).await {
+        Ok(out) => {
+            let note_rel_path = format!("_FormulaChunks/{source_name}/{chunk_id}.md");
+            let mut inserted_n = 0_u32;
+            for f in out.formulas {
+                let latex = f.latex.trim().to_string();
+                if latex.is_empty() {
+                    continue;
+                }
+                let mut syms = f.symbols.clone();
+                syms.sort();
+                syms.dedup();
+                let latex_norm = syms.join("|");
+                let symbols_csv = syms.join(",");
+                match db
+                    .upsert_formula(
+                        &latex_norm,
+                        &latex,
+                        &symbols_csv,
+                        &f.context_caption,
+                        &note_rel_path,
+                    )
+                    .await
+                {
+                    Ok(true) => inserted_n += 1,
+                    Ok(false) => {}
+                    Err(e) => warn!(error = %e, "upsert_formula failed"),
+                }
+            }
+            let _ = db
+                .increment_usage(UsageKind::Harvester, 0, 0)
+                .await;
+            info!(
+                chunk_id,
+                new_formulas = inserted_n,
+                "formula_extract done"
+            );
+            db.finish_agent_task(task.id).await?;
+        }
+        Err(e) => {
+            error!(error = %e, chunk_id, "formula_extract failed");
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn summarise_topic_by_tag(vault: &Arc<VaultWriter>, tag: &str) -> String {
     let abs = vault.vault_dir().join("Topics").join(format!("{tag}.md"));
     tokio::fs::read_to_string(&abs).await.unwrap_or_default()
@@ -729,6 +835,7 @@ async fn filter_formulas_for_topics(
     vault: &Arc<VaultWriter>,
 ) -> Vec<Formula> {
     let mut allowed: std::collections::HashSet<String> = Default::default();
+    let re = regex::Regex::new(r"\(([^)]+\.md)\)").unwrap();
     for tag in topic_tags {
         let topic_file = vault
             .vault_dir()
@@ -737,7 +844,6 @@ async fn filter_formulas_for_topics(
         let content = tokio::fs::read_to_string(&topic_file)
             .await
             .unwrap_or_default();
-        let re = regex::Regex::new(r"\(([^)]+\.md)\)").unwrap();
         for caps in re.captures_iter(&content) {
             allowed.insert(caps.get(1).unwrap().as_str().to_string());
         }

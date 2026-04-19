@@ -11,7 +11,8 @@ Drop a PDF into the watched folder → get titled `.md` notes with
 both a per-source axis (one textbook) and a cross-source Topics axis
 (same concept across every textbook that mentions it). A pool of
 research agents then keeps sifting the vault for cross-textbook
-syntheses, mechanistic bridges, and derivational links between topics.
+syntheses, mechanistic bridges, theorem-style proofs, derivation chains,
+and daily prose reports.
 
 ---
 
@@ -22,8 +23,8 @@ bucket. Running two models side-by-side effectively doubles throughput:
 
 | Tier | Model | RPM / RPD | Roles |
 |------|-------|-----------|-------|
-| **Light** | `gemma-4-26b-it` | 15 / 1,500 | Extractor, Harvester (+ ErrorRetrier, FormulaExtractor — planned) |
-| **Heavy** | `gemma-4-31b-it` | 15 / 1,500 | Curator, Bridge (+ TheoremProver, DerivationChain, ReportWriter — planned) |
+| **Light** | `gemma-4-26b-it` | 15 / 1,500 | Extractor, Harvester, FormulaExtractor, ErrorRetrier |
+| **Heavy** | `gemma-4-31b-it` | 15 / 1,500 | Curator, Bridge, TheoremProver, DerivationChain, ReportWriter |
 
 Each tier has an independent global `governor` bucket and independent
 per-role daily counters — a burst on one tier never starves the other.
@@ -31,12 +32,14 @@ All LLM calls gate through `Limiter::admit(Role)`; the role's tier is
 resolved via `Role::tier()`.
 
 ```
-  Light tier (15 RPM)               Heavy tier (15 RPM)
-  ─────────────────                 ─────────────────
-   Extractor ─┐                     ┌─ Curator
-   Harvester ─┤  ── Limiter.admit ──┤─ Bridge
-              │                     └─ (Theorem / Derivation / Report — planned)
-              └──── Gemma 4 26B         ──── Gemma 4 31B
+  Light tier (15 RPM)                Heavy tier (15 RPM)
+  ─────────────────                  ─────────────────
+   Extractor         ─┐              ┌─ Curator
+   Harvester         ─┤              ├─ Bridge
+   FormulaExtractor  ─┤ ─ admit(R) ─ ┤─ TheoremProver
+   ErrorRetrier      ─┘              ├─ DerivationChain
+                                     └─ ReportWriter
+       Gemma 4 26B                       Gemma 4 31B
 ```
 
 ---
@@ -48,14 +51,19 @@ flowchart LR
     subgraph HOST["Host (Raspberry Pi / laptop)"]
         direction LR
         WATCH[["public/<br/>*.pdf (watch + vault)"]]
-        INGEST["ingest.rs<br/>sha256 → pdf_oxide → chunks"]
-        DB[(SQLite WAL<br/>.data/state.db)]
+        INGEST["ingest.rs<br/>sha256 → pdf_oxide → chunks<br/>+ math_density_score"]
+        DB[(SQLite WAL<br/>.data/state.db<br/>chunks · agent_tasks · formulas)]
         ORCH["orchestrator.rs<br/>claim_batch · 30s ticker"]
         SCHED["scheduler.rs<br/>60s idle tick"]
-        EXT_AG["Extractor<br/>(Light: Gemma 4 26B)"]
-        CUR["Curator<br/>(Heavy: Gemma 4 31B)"]
-        BR["Bridge<br/>(Heavy: Gemma 4 31B)"]
-        HV["Harvester<br/>(regex, no LLM)"]
+        EXT_AG["Extractor<br/>(Light 26B)"]
+        CUR["Curator<br/>(Heavy 31B)"]
+        BR["Bridge<br/>(Heavy 31B)"]
+        TH["TheoremProver<br/>(Heavy 31B)"]
+        DE["DerivationChain<br/>(Heavy 31B)"]
+        RP["ReportWriter<br/>(Heavy 31B)"]
+        HV["Harvester<br/>(regex)"]
+        FE["FormulaExtractor<br/>(Light 26B)"]
+        RE["ErrorRetrier<br/>(DB sweep)"]
         VAULT["VaultWriter<br/>vault.rs"]
         OBSIDIAN[["public/<br/>Index.md · Sources/ · Topics/ · Generated/"]]
     end
@@ -68,16 +76,25 @@ flowchart LR
     end
 
     WATCH --> INGEST --> DB
+    INGEST -. math-dense chunk .-> DB
     DB --> ORCH --> EXT_AG --> VAULT --> OBSIDIAN
     SCHED --> CUR --> VAULT
     SCHED --> BR --> VAULT
+    SCHED --> TH --> VAULT
+    SCHED --> DE --> VAULT
+    SCHED --> RP --> VAULT
     SCHED --> HV --> VAULT
+    DB --> FE --> DB
+    RE --> DB
     BR -. iter 2 .-> TAV
 
-    EXT_AG -. Limiter::admit(Extractor, Light) .-> G26
-    HV -. regex-first .-> G26
-    CUR -. Limiter::admit(Curator, Heavy) .-> G31
-    BR -. Limiter::admit(Bridge, Heavy) .-> G31
+    EXT_AG -. admit(Extractor, Light) .-> G26
+    FE    -. admit(FormulaExtractor, Light) .-> G26
+    CUR   -. admit(Curator, Heavy) .-> G31
+    BR    -. admit(Bridge, Heavy) .-> G31
+    TH    -. admit(Theorem, Heavy) .-> G31
+    DE    -. admit(Derivation, Heavy) .-> G31
+    RP    -. admit(Report, Heavy) .-> G31
 
     HOST -. per-agent spans .-> OTLP
 
@@ -85,37 +102,61 @@ flowchart LR
     class G26,G31,TAV,OTLP ext
 ```
 
+### Formula salvage pipeline
+
+`pdf_oxide` is text-only, so math glyphs in a PDF are often dropped or
+mangled. The salvage path runs inline with ingest:
+
+```
+ PDF page markdown ─▶ math_density_score  ─▶ < τ  : skip
+                          (formula_detect.rs)
+                                │
+                                └─▶ ≥ τ  : enqueue FormulaExtract task
+                                           (chunk_id, doc_hash, source, score)
+                                                     │
+                                   orchestrator tick ▼
+                                           FormulaExtractorAgent  (Light 26B)
+                                                     │
+                                           LaTeX + symbols + caption
+                                                     │
+                                           upsert_formula(…)  → formulas table
+                                                     │
+                                           FormulaHarvester rewrites
+                                           Formulas.md on its own tick
+```
+
+Chosen over a vision-based render path: no `pdfium-render` dependency,
+no per-page PNG rendering, no extra model — re-uses the same light-tier
+Gemma 4 26B under the existing RPM budget.
+
 ---
 
 ## Agents
 
 All agents share an `AgentCtx` with DB, `VaultWriter`, and the shared
 `Limiter`. Each agent's entrypoint is instrumented with
-`#[tracing::instrument]` so Jaeger shows a span tree per pipeline stage.
+`#[tracing::instrument]` so Jaeger shows a span tree per pipeline stage,
+and each claim emits an `info!(target: "agent.spawn", ...)` event so the
+fan-out is visible on a single `scheduler.tick` span.
 
 | Agent | File | Tier | What it does |
 |-------|------|------|--------------|
 | **Extractor** | `src/agents/extractor.rs` | Light | PDF chunk → KG JSON via structured output. Explains what each entity *is*, not just lists keywords. |
+| **FormulaExtractor** | `src/agents/formula_extractor.rs` | Light | Enqueued by `ingest.rs` when a chunk's math-density score crosses τ. Salvages formulas that `pdf_oxide` dropped and feeds them into the `formulas` table. |
+| **FormulaHarvester** | `src/agents/harvester.rs` | Light (regex-first) | Scans `Generated/**.md` for `$$...$$` and `\(...\)` blocks; rewrites `Formulas.md`. Uses the shared formula store so FormulaExtractor output appears in the same index. |
+| **ErrorRetrier** | `src/agents/retrier.rs` | Light (DB sweep) | Periodic sweep of `chunks.state='error'`. Promotes to `pending` with exponential backoff up to `ERROR_RETRY_MAX`, then to `failed_final`. No more silently stranded chunks. |
 | **TopicCurator** | `src/agents/curator.rs` | Heavy | When a Topic has gained ≥ K new entries, synthesises a cross-textbook note with verbatim-cited formulas. |
 | **BridgeFinder** | `src/agents/bridge.rs` | Heavy | 3-iteration loop (propose → Tavily-refine → critique) finding *mechanistic* links between two Topics in different sources. Emits only when `confidence ≥ τ`. |
-| **LiteratureSearch** | `src/agents/search.rs` | — | Tavily client; invoked by Bridge iter 2. Budget-disciplined; six academic-only domains. |
-| **FormulaHarvester** | `src/agents/harvester.rs` | Light (regex-first) | Scans `Generated/**.md` for `$$...$$` and `\(...\)` blocks; rewrites `Formulas.md`. LLM fallback reserved for ambiguous blocks. |
-
-**Planned additions** (see `C:\Users\rahul\.claude\plans\i-want-to-update-sleepy-minsky.md` for the full design):
-
-| Agent | Tier | Purpose |
-|-------|------|---------|
-| FormulaExtractor (hybrid vision) | Light | Render math-dense pages via pdfium, pass to Gemma-4 vision (280-token budget) → LaTeX back into chunk markdown. |
-| TheoremProver | Heavy | On high-confidence Bridges, emit formal-style notes with Given / Claim / Proof / Derivation sections. |
-| DerivationChain | Heavy | Periodic walk over the formula graph producing derivational chains between topics. |
-| ReportWriter | Heavy | Daily synthesis of the last 24h of notes into a prose multi-topic report. |
-| ErrorRetrier | Light | Periodic retry of `state='error'` chunks with exponential backoff — replaces the current leave-and-forget behaviour that stranded 300+ chunks in a recent run. |
+| **TheoremProver** | `src/agents/theorem.rs` | Heavy | Gated on high-confidence bridges. Emits formal-style notes to `Generated/_Theorems/` with **Given**, **Claim**, **Proof sketch**, **Derivation**, **References** sections. |
+| **DerivationChain** | `src/agents/derivation.rs` | Heavy | Periodic walk over the formula graph, producing derivational chains `f₁ → … → fₙ` to `Generated/_Derivations/`. |
+| **ReportWriter** | `src/agents/report.rs` | Heavy | Daily (`REPORT_INTERVAL_SECS`) prose synthesis of the last 24 h of Syntheses + Bridges + Theorems to `Generated/_Reports/{YYYY-MM-DD}.md`. |
+| **LiteratureSearch** | `src/agents/search.rs` | — | Tavily client; invoked by Bridge iter 2 only. Budget-disciplined; six academic-only domains. |
 
 ---
 
 ## Vault layout
 
-Two-axis hierarchical index, same as before:
+Two-axis hierarchical index:
 
 ```
 {vault}/
@@ -125,10 +166,10 @@ Two-axis hierarchical index, same as before:
   Generated/{source}/{slug}-{yyyymmdd-hhmmss}.md   type: content
   Generated/_Syntheses/        TopicCurator output
   Generated/_Bridges/          BridgeFinder output
-  Generated/_Theorems/         TheoremProver output (planned)
-  Generated/_Derivations/      DerivationChain output (planned)
-  Generated/_Reports/          ReportWriter output (planned)
-  Formulas.md                  FormulaHarvester output
+  Generated/_Theorems/         TheoremProver output
+  Generated/_Derivations/      DerivationChain output
+  Generated/_Reports/          ReportWriter output
+  Formulas.md                  Harvester + FormulaExtractor output
 ```
 
 - Every write updates three axes: the source index, every topic index,
@@ -148,15 +189,18 @@ All skills under `skills/` are structured for Gemma 4:
 
 - **Role & scope** first, then **constraints**, **output schema**,
   **exemplars**.
-- Heavy-tier skills (Curator, Bridge) instruct the model to **think
-  step-by-step before answering**. The autoagents chat template owns
-  turn framing, so raw `<|turn>` / `<|think|>` tokens are not injected
-  into content — the template produces them at serialization.
+- Heavy-tier skills (Curator, Bridge, Theorem, Derivation, Report)
+  instruct the model to think step-by-step before answering. The
+  autoagents chat template owns turn framing, so raw control tokens are
+  not injected into content — the template produces them at
+  serialization.
 - `kg_extractor.md` enforces "**explain, don't list**": every entity
   must get ≥ 1 sentence of prose in `markdown_snippet`, and `summary`
   must be 2–3 sentences of content, not a keyword line.
 - `bridge_search_refine.md` uses a "LOW thinking" instruction to keep
   iter-2 latency bounded.
+- `formula_extractor.md` forbids inventing context and mandates
+  verbatim LaTeX — only formulas visibly present in the chunk survive.
 
 ---
 
@@ -182,8 +226,17 @@ cargo run --release
 # 4. Drop PDFs into ./public and watch the vault populate.
 ```
 
-Jaeger shows one span per agent invocation, each tagged with
-`agent.role`, `agent.tier`, and `agent.model`.
+Jaeger spans of interest:
+
+- `ingest` · `extract` · `write_note` (ingest path)
+- `curate` · `bridge.iterate` · `bridge.propose` · `bridge.critique`
+- `agent.theorem` · `agent.derivation` · `agent.report`
+- `agent.formula_extract` · `agent.retry`
+- `limiter.admit` (tier + role as attributes)
+
+Each claim also emits an `agent.spawn` event within the surrounding
+`scheduler.tick` / orchestrator span so the fan-out is visible at a
+glance.
 
 ---
 
@@ -199,19 +252,31 @@ Jaeger shows one span per agent invocation, each tagged with
 | `LIGHT_MODEL` | `gemma-4-26b-it` | Light-tier model |
 | `HEAVY_MODEL` | `gemma-4-31b-it` | Heavy-tier model |
 | `REASONER_MODEL` | *(deprecated)* | Fallback source for `HEAVY_MODEL` when the new var is unset |
-| `VISION_MODEL` | `gemini-3.1-flash-lite-preview` | Vision endpoint (reserved) |
+| `CURATOR_MODEL` / `BRIDGE_MODEL` / `THEOREM_MODEL` / `DERIVATION_MODEL` / `REPORT_MODEL` | *(empty → `HEAVY_MODEL`)* | Per-role overrides on the heavy tier |
+| `FORMULA_MODEL` | *(empty → `LIGHT_MODEL`)* | Override for FormulaExtractor only |
+| `VISION_MODEL` | `gemini-3.1-flash-lite-preview` | Reserved for future vision path |
 | `RPM_LIMIT` | `14` | Per-tier RPM ceiling |
 | `RPD_LIMIT` | `1500` | Per-tier daily ceiling |
-| `ROLE_SHARE_EXTRACTOR` / `CURATOR` / `BRIDGE` / `HARVESTER` | `60 / 20 / 15 / 5` | Daily quota distribution within a tier |
+| `ROLE_SHARE_EXTRACTOR` / `HARVESTER` / `FORMULA` | `50 / 5 / 10` | Light-tier daily quota shares (extractor + retrier + formula + harvester) |
+| `ROLE_SHARE_CURATOR` / `BRIDGE` / `THEOREM` / `DERIVATION` / `REPORT` | `15 / 12 / 8 / 7 / 3` | Heavy-tier daily quota shares |
+| `FORMULA_DETECT_TAU` | `0.12` | Math-density cutoff above which ingest enqueues a FormulaExtract task |
 | `INDEX_ENTRY_CAP` | `20` | Index entries before split; bucket overflow is a **hard error** |
 | `CURATE_DELTA_K` | `5` | New entries per Topic before a curate task fires |
 | `BRIDGE_MAX_PENDING` | `6` | Queue ceiling for Bridge tasks |
 | `BRIDGE_MAX_ITERS` | `3` | Cap on propose → search → critique loop |
-| `BRIDGE_CONFIDENCE_TAU` | `0.72` | Acceptance threshold |
+| `BRIDGE_CONFIDENCE_TAU` | `0.72` | Bridge acceptance threshold |
 | `BRIDGE_MIN_OVERLAP` / `MAX_OVERLAP` | `1 / 5` | Entity overlap band for candidate pairs |
 | `BRIDGE_MAX_JACCARD` | `0.6` | Near-duplicate cutoff |
+| `THEOREM_CONFIDENCE_TAU` | `0.85` | Bridge confidence required to trigger a Theorem task |
+| `THEOREM_ENQUEUE_BATCH` | `2` | Max Theorem tasks enqueued per scheduler tick |
+| `DERIVATION_MIN_FORMULAS` | `3` | Minimum formulas on a seed topic before Derivation runs |
+| `REPORT_INTERVAL_SECS` | `86400` | Cadence of Report tasks |
+| `ERROR_RETRY_INTERVAL_SECS` | `300` | ErrorRetrier sweep cadence |
+| `ERROR_RETRY_MAX` | `3` | Retries before `state='failed_final'` |
+| `ERROR_RETRY_BACKOFF_SECS` | `300` | Base backoff for exponential retry |
+| `ERROR_RETRY_BATCH` | `20` | Max error chunks promoted per sweep |
 | `SCHEDULER_INTERVAL_SECS` | `60` | Idle-scheduler tick |
-| `RESEARCH_INTERVAL_SECS` | `30` | Curator + Bridge drain cadence |
+| `RESEARCH_INTERVAL_SECS` | `30` | Curator + Bridge + heavy-research + formula drain cadence |
 | `TAVILY_API_KEY` | *(empty)* | Blank disables LiteratureSearch |
 | `TAVILY_MONTHLY_LIMIT` | `1000` | Vendor monthly cap |
 | `TAVILY_DOMAINS` | arxiv / semanticscholar / acm / springer / nature / sciencedirect | Allow-listed domains |
@@ -227,10 +292,13 @@ Jaeger shows one span per agent invocation, each tagged with
 - **Tavily free tier.** 1,000 calls / month. Bridge iter 2 is the only
   consumer; the search agent degrades gracefully when the budget is
   exhausted.
-- **Error chunks.** The current extractor marks failed chunks
-  `state='error'` and does not retry. The **ErrorRetrier** agent
-  (planned) addresses this; until then, manual SQL intervention is
-  required to re-queue long-lived error chunks.
+- **Error chunks.** Now handled by ErrorRetrier with exponential backoff
+  capped at `ERROR_RETRY_MAX`; after the cap, chunks move to
+  `state='failed_final'` and require manual inspection.
+- **Formula salvage is text-only.** A chunk whose source PDF rendered
+  the math as raster glyphs (not text) will still be lost — the
+  math-density heuristic can only flag what `pdf_oxide` produced. A
+  vision-based fallback is parked behind `VISION_MODEL` for future work.
 - **Deep-split overflow.** A single alphabetical bucket exceeding
   `INDEX_ENTRY_CAP` is a hard error. Raise the cap or split the source
   textbook into finer sub-indices.
@@ -240,9 +308,10 @@ Jaeger shows one span per agent invocation, each tagged with
 ## Build gates
 
 ```bash
-cargo check                  # must pass before committing
+cargo check --all-targets    # must pass before committing
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo test                   # tests/vault_split.rs + tests/limiter_tiers.rs
 ```
 
 ---
@@ -251,10 +320,12 @@ cargo clippy -- -D warnings
 
 ```
 src/            Rust source — one module per role.
+  agents/       One file per agent (extractor, curator, bridge, theorem, derivation, report, harvester, formula_extractor, retrier, search).
+  formula_detect.rs  Math-density heuristic used by ingest.rs.
 skills/         Markdown instruction files for the LLM agents (Gemma-4 structure).
 migrations/     SQLx migrations, applied on startup.
 systemd/        Production deployment unit.
 deploy/otel/    Local Jaeger all-in-one compose for OTel development.
-public/         Default watch + vault directory (sample GIS textbook included).
+public/         Default watch + vault directory (sample textbooks included).
 .data/          Runtime state (SQLite DB). Gitignored.
 ```

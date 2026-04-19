@@ -9,8 +9,11 @@ use sha2::{Digest, Sha256};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
-use crate::db::Db;
+use serde_json::json;
+
+use crate::db::{AgentTaskKind, Db};
 use crate::error::{AppError, AppResult};
+use crate::formula_detect::math_density_score;
 
 /// Target tokens per DB row. Small enough to give the batcher flexibility,
 /// large enough to avoid INSERT-per-paragraph overhead.
@@ -43,7 +46,12 @@ pub async fn hash_file(path: &Path) -> AppResult<(String, u64)> {
 /// Pull per-page markdown via pdf_oxide, regroup into token-budgeted chunks,
 /// and persist to SQLite. Runs the CPU-bound extraction on a blocking thread
 /// so we don't stall the tokio runtime on the Pi's limited cores.
-pub async fn ingest_pdf(db: &Db, watch_dir: &Path, path: &Path) -> AppResult<IngestOutcome> {
+pub async fn ingest_pdf(
+    db: &Db,
+    watch_dir: &Path,
+    path: &Path,
+    formula_detect_tau: f32,
+) -> AppResult<IngestOutcome> {
     let (hash, size) = hash_file(path).await?;
     let source_name = derive_source_name(watch_dir, path);
     let inserted = db
@@ -79,12 +87,22 @@ pub async fn ingest_pdf(db: &Db, watch_dir: &Path, path: &Path) -> AppResult<Ing
         let t = approx_tokens(page_md);
         if !chunk_buf.is_empty() && chunk_tokens + t > CHUNK_TARGET_TOKENS {
             let end_page = page_no - 1;
-            db.insert_chunk(
+            let chunk_id = db
+                .insert_chunk(
+                    &hash,
+                    chunk_start,
+                    end_page,
+                    &chunk_buf,
+                    chunk_tokens as i64,
+                )
+                .await?;
+            maybe_enqueue_formula(
+                db,
+                chunk_id,
                 &hash,
-                chunk_start,
-                end_page,
+                &source_name,
                 &chunk_buf,
-                chunk_tokens as i64,
+                formula_detect_tau,
             )
             .await?;
             chunks_written += 1;
@@ -101,8 +119,18 @@ pub async fn ingest_pdf(db: &Db, watch_dir: &Path, path: &Path) -> AppResult<Ing
 
     if !chunk_buf.is_empty() {
         let end_page = pages.len() as i64;
-        db.insert_chunk(&hash, chunk_start, end_page, &chunk_buf, chunk_tokens as i64)
+        let chunk_id = db
+            .insert_chunk(&hash, chunk_start, end_page, &chunk_buf, chunk_tokens as i64)
             .await?;
+        maybe_enqueue_formula(
+            db,
+            chunk_id,
+            &hash,
+            &source_name,
+            &chunk_buf,
+            formula_detect_tau,
+        )
+        .await?;
         chunks_written += 1;
     }
 
@@ -112,6 +140,42 @@ pub async fn ingest_pdf(db: &Db, watch_dir: &Path, path: &Path) -> AppResult<Ing
         hash,
         chunks: chunks_written,
     })
+}
+
+/// If a chunk's math density crosses `tau`, enqueue a `FormulaExtract`
+/// task so the light-tier FormulaExtractor can salvage its LaTeX. Low-
+/// scoring chunks are skipped entirely — no LLM call, no queue row.
+async fn maybe_enqueue_formula(
+    db: &Db,
+    chunk_id: i64,
+    doc_hash: &str,
+    source_name: &str,
+    content: &str,
+    tau: f32,
+) -> AppResult<()> {
+    let score = math_density_score(content);
+    if score < tau {
+        return Ok(());
+    }
+    let payload = json!({
+        "chunk_id": chunk_id,
+        "doc_hash": doc_hash,
+        "source_name": source_name,
+        "score": score,
+    });
+    let id = db
+        .enqueue_agent_task(AgentTaskKind::FormulaExtract, &payload)
+        .await?;
+    tracing::info!(
+        target: "agent.spawn",
+        role = "formula_extractor",
+        tier = "light",
+        task_id = id,
+        chunk_id,
+        score,
+        "formula_extract enqueued"
+    );
+    Ok(())
 }
 
 /// Run pdf_oxide on a blocking thread. `to_markdown(page)` gives us clean,

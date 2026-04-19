@@ -10,7 +10,9 @@ use tracing::info;
 use edge_kg_agent::{
     agents::{
         bridge::BridgeFinderAgent, curator::TopicCuratorAgent,
-        derivation::DerivationChainAgent, harvester::FormulaHarvesterAgent,
+        derivation::DerivationChainAgent,
+        formula_extractor::FormulaExtractorAgent,
+        harvester::FormulaHarvesterAgent,
         report::ReportWriterAgent, retrier::ErrorRetrierAgent,
         search::LiteratureSearchAgent, theorem::TheoremProverAgent,
         KnowledgeGraphAgent,
@@ -84,6 +86,7 @@ async fn run() -> AppResult<()> {
     let theorem_agent = TheoremProverAgent::new(&cfg, limiter.clone())?;
     let derivation_agent = DerivationChainAgent::new(&cfg, limiter.clone())?;
     let report_agent = ReportWriterAgent::new(&cfg, limiter.clone())?;
+    let formula_agent = FormulaExtractorAgent::new(&cfg, limiter.clone())?;
     let scheduler = Scheduler::new(cfg.clone(), db.clone())?;
 
     let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);
@@ -99,6 +102,7 @@ async fn run() -> AppResult<()> {
     orch.spawn_harvester(harvester_agent);
     orch.spawn_error_retrier(retrier_agent);
     orch.spawn_heavy_research(theorem_agent, derivation_agent, report_agent);
+    orch.spawn_formula_extractor(formula_agent);
     orch.spawn_idle_scheduler(scheduler);
 
     shutdown_signal().await;

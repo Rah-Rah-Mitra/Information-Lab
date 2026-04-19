@@ -484,6 +484,17 @@ impl Db {
     // Formula corpus.
     // -----------------------------------------------------------------------
 
+    /// Fetch a chunk's raw content by id. Used by the formula extractor
+    /// drain to re-hydrate the text after the task was enqueued.
+    pub async fn get_chunk_content(&self, id: i64) -> AppResult<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT content FROM chunks WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     pub async fn upsert_formula(
         &self,
         latex_norm: &str,
@@ -716,7 +727,6 @@ impl From<std::num::TryFromIntError> for AppError {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Theorem/Derivation/Report/FormulaExtract/ErrorRetry wired incrementally.
 pub enum AgentTaskKind {
     Curate,
     Bridge,
@@ -725,7 +735,6 @@ pub enum AgentTaskKind {
     Derivation,
     Report,
     FormulaExtract,
-    ErrorRetry,
 }
 
 impl AgentTaskKind {
@@ -738,7 +747,6 @@ impl AgentTaskKind {
             AgentTaskKind::Derivation => "Derivation",
             AgentTaskKind::Report => "Report",
             AgentTaskKind::FormulaExtract => "FormulaExtract",
-            AgentTaskKind::ErrorRetry => "ErrorRetry",
         }
     }
 }

@@ -60,6 +60,7 @@ pub enum Role {
     Theorem,
     Derivation,
     Report,
+    FormulaExtractor,
 }
 
 impl Role {
@@ -73,6 +74,7 @@ impl Role {
             Role::Theorem,
             Role::Derivation,
             Role::Report,
+            Role::FormulaExtractor,
         ]
     }
 
@@ -85,6 +87,7 @@ impl Role {
             Role::Theorem => "theorem",
             Role::Derivation => "derivation",
             Role::Report => "report",
+            Role::FormulaExtractor => "formula_extractor",
         }
     }
 
@@ -96,7 +99,7 @@ impl Role {
     /// run on Heavy.
     pub fn tier(self) -> Tier {
         match self {
-            Role::Extractor | Role::Harvester => Tier::Light,
+            Role::Extractor | Role::Harvester | Role::FormulaExtractor => Tier::Light,
             Role::Curator
             | Role::Bridge
             | Role::Theorem
@@ -145,6 +148,7 @@ impl Limiter {
             (Role::Theorem, cfg.role_share_theorem),
             (Role::Derivation, cfg.role_share_derivation),
             (Role::Report, cfg.role_share_report),
+            (Role::FormulaExtractor, cfg.role_share_formula),
         ];
         let sum: u32 = shares.iter().map(|(_, s)| *s).sum::<u32>().max(1);
 

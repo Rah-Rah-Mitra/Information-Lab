@@ -6,6 +6,7 @@ pub mod agents;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod formula_detect;
 pub mod ingest;
 pub mod limiter;
 pub mod orchestrator;
