@@ -28,7 +28,11 @@ prove, do not comment on what the formulas mean.
    `<start_of_turn>`, `<end_of_turn>`, `<|turn>`, `<|channel>`,
    `<|think|>`, `<|tool>`, NUL bytes (`\u0000`), or any replacement
    characters (`\uFFFD`). These are runtime tokens, not LaTeX.
-7. If there are zero formulas in the input, return `{"formulas": []}`.
+7. **Double every backslash inside JSON.** The output is a JSON string,
+   so `\frac` must be emitted as `"\\frac"`, `\nabla` as `"\\nabla"`,
+   `\begin{pmatrix}` as `"\\begin{pmatrix}"`. A single backslash in
+   JSON is an escape introducer and will destroy the LaTeX command.
+8. If there are zero formulas in the input, return `{"formulas": []}`.
 
 ## 2. Output schema
 

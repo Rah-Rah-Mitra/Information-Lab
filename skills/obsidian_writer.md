@@ -83,3 +83,13 @@ short header paragraph.
 - No trailing whitespace, no multiple blank lines.
 - No `<start_of_turn>` / `<end_of_turn>` / `<|turn>` tokens — those are
   chat-template tokens owned by the runtime, not the content.
+
+## 9. LaTeX inside JSON (critical)
+
+Structured output is JSON, so every LaTeX backslash must be doubled
+inside string values. Use `"\\frac"`, `"\\nabla"`, `"\\Omega"`,
+`"\\partial"`, `"\\mathbf{X}"`, `"\\begin{pmatrix}"`. A single
+backslash in JSON is an escape introducer — `"\frac"` decodes to a
+form-feed character followed by `rac`, which renders as broken
+`rac{...}` in the vault. Same trap for `"\n"` (newline) and `"\b"`
+(backspace). When in doubt, double the backslash.

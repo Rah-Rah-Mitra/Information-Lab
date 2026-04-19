@@ -3,7 +3,7 @@
 //! We group pages into ~CHUNK_TARGET_TOKENS-sized chunks so batches downstream
 //! can be assembled efficiently. `pdf_oxide` does the heavy lifting.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -53,11 +53,11 @@ pub async fn ingest_pdf(
     formula_detect_tau: f32,
 ) -> AppResult<IngestOutcome> {
     let (hash, size) = hash_file(path).await?;
-    let source_name = derive_source_name(watch_dir, path);
+    let (stored_path, source_name) = normalize_document_path(watch_dir, path);
     let inserted = db
         .insert_document(
             &hash,
-            &path.display().to_string(),
+            &stored_path,
             size as i64,
             &source_name,
         )
@@ -213,26 +213,72 @@ async fn extract_pages_blocking(path: &Path) -> AppResult<Vec<String>> {
 /// folder and source-index key — stable per PDF, deterministic, no hash
 /// exposure.
 ///
-/// Rule: first path component under `watch_dir` if the PDF sits in a
-/// subdir (e.g. `public/GIS/foo.pdf` → `GIS`); otherwise the filename
-/// stem (e.g. `public/foo.pdf` → `foo`).
-fn derive_source_name(watch_dir: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(watch_dir).unwrap_or(path);
-    let mut comps = rel.components();
-    if let Some(first) = comps.next() {
-        if comps.next().is_some() {
-            // At least one more component remains — `first` is a dir.
-            if let Some(s) = first.as_os_str().to_str() {
-                if !s.is_empty() {
-                    return s.to_string();
-                }
+/// Resolve a stable (storage-path, source-name) pair from an ingested PDF.
+///
+/// The stored path is relative to `watch_dir` when possible, with
+/// forward slashes — so the SYSTEM_STATUS document table renders
+/// consistently regardless of whether the watcher handed us an
+/// absolute Windows path, a relative POSIX-style path, or a mix.
+///
+/// The source name is the first directory component of the relative
+/// path (`public/GIS/foo.pdf` → `GIS`), falling back to the file stem
+/// when the PDF sits directly under `watch_dir`. Drive-letter
+/// components (`D:`) are explicitly skipped — those only appear when
+/// the lexical strip failed and we don't want "D:" as a source bucket.
+fn normalize_document_path(watch_dir: &Path, path: &Path) -> (String, String) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let abs_watch = lexical_clean(&if watch_dir.is_absolute() {
+        watch_dir.to_path_buf()
+    } else {
+        cwd.join(watch_dir)
+    });
+    let abs_path = lexical_clean(&if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    });
+
+    let rel: PathBuf = abs_path
+        .strip_prefix(&abs_watch)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| abs_path.clone());
+
+    let stored = rel.to_string_lossy().replace('\\', "/");
+
+    let comps: Vec<_> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(os) => os.to_str().map(|s| s.to_string()),
+            _ => None,
+        })
+        .collect();
+    let source = if comps.len() > 1 {
+        comps[0].clone()
+    } else {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    };
+
+    (stored, source)
+}
+
+/// Collapse `.` and `..` segments lexically. We avoid `fs::canonicalize`
+/// because on Windows it returns `\\?\` extended-length paths that are
+/// ugly to display and not what users expect in SYSTEM_STATUS.
+fn lexical_clean(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
             }
+            other => out.push(other.as_os_str()),
         }
     }
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
+    out
 }
 
 #[derive(Debug)]

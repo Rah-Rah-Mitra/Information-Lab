@@ -117,10 +117,54 @@ pub(crate) fn scrub_llm_text(s: &str) -> String {
             cleaned = cleaned.replace(tok, "");
         }
     }
-    cleaned
+    let no_controls: String = cleaned
         .chars()
         .filter(|c| *c != '\u{0000}' && *c != '\u{FFFD}')
-        .collect()
+        .collect();
+    restore_latex_escapes(&no_controls)
+}
+
+/// Reverse the damage when a model emits JSON with *single*-backslash
+/// LaTeX commands. JSON decodes `"\frac"` to `FF+rac`, `"\nabla"` to
+/// `LF+abla`, `"\bar"` to `BS+ar`, etc. — we see `rac{...}`, broken
+/// lines, and stray control chars in the vault.
+///
+/// Control chars that never have a legitimate use in content (BEL, BS,
+/// VT, FF) are restored unconditionally. Ambiguous ones (LF, CR, HT)
+/// are only restored inside `$...$` / `$$...$$` math spans, where they
+/// cannot legitimately appear.
+pub(crate) fn restore_latex_escapes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut in_math = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '$' {
+            out.push('$');
+            if i + 1 < chars.len() && chars[i + 1] == '$' {
+                out.push('$');
+                in_math = !in_math;
+                i += 2;
+                continue;
+            }
+            in_math = !in_math;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\u{0007}' => out.push_str("\\a"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000B}' => out.push_str("\\v"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\n' if in_math => out.push_str("\\n"),
+            '\r' if in_math => out.push_str("\\r"),
+            '\t' if in_math => out.push_str("\\t"),
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Map the [`Role`] the limiter knows about to the [`UsageKind`] column

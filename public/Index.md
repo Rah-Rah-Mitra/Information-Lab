@@ -11,11 +11,28 @@ Two-axis navigation. **Sources** lists every textbook ingested; **Topics** is th
 
 ## Sources
 
+- [[D:]] (Sources/D_.md)
 - [[CV]] (Sources/CV.md)
 - [[GIS]] (Sources/GIS.md)
 - [[OR]] (Sources/OR.md)
 ## Topics
 
+- [[discretization-techniques]] — #discretization-techniques (Topics/discretization-techniques.md)
+- [[partial-differential-equations]] — #partial-differential-equations (Topics/partial-differential-equations.md)
+- [[high-performance-computing]] — #high-performance-computing (Topics/high-performance-computing.md)
+- [[numerical-methods]] — #numerical-methods (Topics/numerical-methods.md)
+- [[schwarz-methods]] — #schwarz-methods (Topics/schwarz-methods.md)
+- [[schur-complement]] — #schur-complement (Topics/schur-complement.md)
+- [[domain-decomposition]] — #domain-decomposition (Topics/domain-decomposition.md)
+- [[numerical-analysis]] — #numerical-analysis (Topics/numerical-analysis.md)
+- [[parallel-computing]] — #parallel-computing (Topics/parallel-computing.md)
+- [[incomplete-lu]] — #incomplete-lu (Topics/incomplete-lu.md)
+- [[preconditioning]] — #preconditioning (Topics/preconditioning.md)
+- [[sparse-matrices]] — #sparse-matrices (Topics/sparse-matrices.md)
+- [[linear-systems]] — #linear-systems (Topics/linear-systems.md)
+- [[krylov-subspace]] — #krylov-subspace (Topics/krylov-subspace.md)
+- [[projection-methods]] — #projection-methods (Topics/projection-methods.md)
+- [[numerical-linear-algebra]] — #numerical-linear-algebra (Topics/numerical-linear-algebra.md)
 - [[sparse-methods]] — #sparse-methods (Topics/sparse-methods.md)
 - [[iterative-methods]] — #iterative-methods (Topics/iterative-methods.md)
 - [[parameter-estimation]] — #parameter-estimation (Topics/parameter-estimation.md)
