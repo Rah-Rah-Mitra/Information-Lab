@@ -39,7 +39,7 @@ pub fn init(cfg: &Config) -> AppResult<TelemetryGuard> {
     let (nb_file, file_guard) = tracing_appender::non_blocking(file_appender);
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("edge_kg_agent=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new("edge_kg_agent=info,pdf_oxide=error,warn"));
 
     let stdout_layer = fmt::layer().with_target(true).with_ansi(true);
     let file_layer = fmt::layer().json().with_writer(nb_file);

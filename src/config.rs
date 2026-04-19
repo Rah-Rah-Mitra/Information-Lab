@@ -108,7 +108,7 @@ pub struct Config {
     /// Research tick (curator + bridge in parallel).
     pub research_interval: Duration,
 
-    /// Overrides for per-role models. Blank falls back to `reasoner_model`.
+    /// Overrides for per-role models. Blank falls back to `heavy_model`.
     pub curator_model: String,
     pub bridge_model: String,
     pub theorem_model: String,
@@ -167,10 +167,10 @@ impl Config {
                 "API_BASE",
                 "https://generativelanguage.googleapis.com/v1beta",
             ),
-            // Gemma 4 26B — light tier. Own 15 RPM / 1.5K RPD budget on the
+            // Gemma 4 26B A4B — light tier. Own 15 RPM / 1.5K RPD budget on the
             // Google AI Studio free tier; doubles effective throughput when
             // paired with the 31B heavy tier.
-            light_model: env_or("LIGHT_MODEL", "gemma-4-26b-it"),
+            light_model: env_or("LIGHT_MODEL", "gemma-4-26b-a4b-it"),
             // Gemma 4 31B Dense — heavy reasoner (15 RPM / 1.5K RPD).
             heavy_model: env_or(
                 "HEAVY_MODEL",

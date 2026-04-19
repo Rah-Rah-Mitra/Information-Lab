@@ -39,11 +39,11 @@ impl Db {
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(std::time::Duration::from_secs(30))
             .log_statements(tracing::log::LevelFilter::Debug);
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(4)
+            .max_connections(6)
             .connect_with(opts)
             .await?;
 

@@ -1,11 +1,11 @@
 //! edge-kg-agent — bootstrap and wire everything together.
 
-use std::process::ExitCode;
+use std::{collections::BTreeSet, process::ExitCode, time::Duration};
 
 use tokio::signal;
 #[cfg(unix)]
 use tracing::error;
-use tracing::info;
+use tracing::{info, warn};
 
 use edge_kg_agent::{
     agents::{
@@ -60,6 +60,9 @@ async fn run() -> AppResult<()> {
         "starting edge-kg-agent"
     );
 
+    log_effective_models(&cfg);
+    validate_models(&cfg).await?;
+
     let db = Db::open(&cfg.db_path).await?;
     let requeued = db.requeue_orphans().await?;
     if requeued > 0 {
@@ -108,6 +111,84 @@ async fn run() -> AppResult<()> {
     shutdown_signal().await;
     info!("shutdown signal received");
     Ok(())
+}
+
+fn log_effective_models(cfg: &Config) {
+    info!(
+        light = %cfg.light_model,
+        heavy = %cfg.heavy_model,
+        reasoner_alias = %cfg.reasoner_model,
+        vision = %cfg.vision_model,
+        formula = %cfg.model_for_override(&cfg.formula_model, &cfg.light_model),
+        curator = %cfg.model_for_role(&cfg.curator_model),
+        bridge = %cfg.model_for_role(&cfg.bridge_model),
+        theorem = %cfg.model_for_role(&cfg.theorem_model),
+        derivation = %cfg.model_for_role(&cfg.derivation_model),
+        report = %cfg.model_for_role(&cfg.report_model),
+        "effective model configuration"
+    );
+}
+
+async fn validate_models(cfg: &Config) -> AppResult<()> {
+    let mut models = BTreeSet::new();
+    models.insert(cfg.light_model.clone());
+    models.insert(cfg.heavy_model.clone());
+    models.insert(cfg.vision_model.clone());
+    models.insert(cfg.model_for_override(&cfg.formula_model, &cfg.light_model));
+    models.insert(cfg.model_for_role(&cfg.curator_model));
+    models.insert(cfg.model_for_role(&cfg.bridge_model));
+    models.insert(cfg.model_for_role(&cfg.theorem_model));
+    models.insert(cfg.model_for_role(&cfg.derivation_model));
+    models.insert(cfg.model_for_role(&cfg.report_model));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?;
+    let base = cfg.api_base.trim_end_matches('/');
+
+    let mut missing = Vec::new();
+    for model in models {
+        let url = format!("{base}/models/{model}");
+        let resp = client
+            .get(&url)
+            .query(&[("key", cfg.api_key.as_str())])
+            .send()
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            missing.push(model);
+            continue;
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| String::new());
+            warn!(
+                status = %status,
+                body = %truncate_for_log(&body, 200),
+                "model preflight returned non-success"
+            );
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(edge_kg_agent::error::AppError::other(format!(
+            "model preflight failed: these model names returned 404: {}",
+            missing.join(", ")
+        )));
+    }
+
+    info!("model preflight ok");
+    Ok(())
+}
+
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 async fn shutdown_signal() {

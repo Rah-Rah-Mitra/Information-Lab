@@ -85,6 +85,7 @@ impl Orchestrator {
         let budget = self.cfg.batch_token_target as i64;
 
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(1)).await;
             let mut ticker = time::interval(Duration::from_secs(30));
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -198,6 +199,7 @@ impl Orchestrator {
         let interval = self.cfg.research_interval;
         let tau = self.cfg.bridge_confidence_tau;
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(5)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -221,6 +223,7 @@ impl Orchestrator {
         let db = self.db.clone();
         let vault = self.vault.clone();
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(15)).await;
             let mut ticker = time::interval(Duration::from_secs(300));
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -308,6 +311,7 @@ impl Orchestrator {
     pub fn spawn_error_retrier(&self, retrier: ErrorRetrierAgent) {
         let interval = self.cfg.error_retry_interval;
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(25)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -343,6 +347,7 @@ impl Orchestrator {
         let vault = self.vault.clone();
         let interval = self.cfg.research_interval;
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(10)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -373,6 +378,7 @@ impl Orchestrator {
         let db = self.db.clone();
         let interval = self.cfg.research_interval;
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(20)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
@@ -389,6 +395,7 @@ impl Orchestrator {
     pub fn spawn_idle_scheduler(&self, scheduler: Scheduler) {
         let interval = self.cfg.scheduler_interval;
         tokio::spawn(async move {
+            time::sleep(Duration::from_secs(30)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {

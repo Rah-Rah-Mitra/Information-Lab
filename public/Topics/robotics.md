@@ -1,0 +1,23 @@
+---
+type: index
+index_kind: topic
+title: "robotics"
+created: 2026-04-19T02:01:57.774691500+00:00
+---
+
+# robotics
+
+Notes tagged **#robotics**, aggregated across every source in this library. This is the cross-textbook view of the topic.
+
+- [[Probabilistic Robotics and State Estimation]] — Probabilistic robotics uses statistical techniques to manage uncertainty in robot perception and control. It relies on the unifying mathematical framework of Bayes filters to represent information an… · #robotics #probabilistic-methods #state-estimation (Generated/CV/probabilistic-robotics-and-state-estimation-20260419-020157.md)
+- [[Foundations of Probabilistic Robotics]] — This note explores the fundamental principles of probabilistic robotics, focusing on the representation of uncertainty through probability distributions. It details the mechanisms of recursive state … · #robotics #probabilistic-robotics #state-estimation (Generated/CV/foundations-of-probabilistic-robotics-20260419-020228.md)
+- [[Gaussian And Nonparametric Bayes Filters]] — This note compares Gaussian-based filters like the Kalman and Extended Kalman filters with nonparametric approaches such as particle filters. It explains the mathematical transitions from linear to n… · #robotics #state-estimation #gaussian-filters (Generated/CV/gaussian-and-nonparametric-bayes-filters-20260419-020253.md)
+- [[Probabilistic Robot Sensor Models]] — This note explores various probabilistic models used to represent sensor measurements in robotics, ranging from raw beam-based models to feature-based landmark models. It details the mathematical mec… · #robotics #sensor-models #probabilistic-robotics (Generated/CV/probabilistic-robot-sensor-models-20260419-020402.md)
+- [[Gaussian And Non-Parametric Localization Techniques]] — This note explores various probabilistic localization methods for mobile robots, ranging from unimodal Gaussian filters like EKF and UKF to non-parametric approaches like Grid and Monte Carlo localiz… · #robotics #localization #probabilistic-filtering (Generated/CV/gaussian-and-non-parametric-localization-techniques-20260419-020428.md)
+- [[Probabilistic Robot Localization and Mapping]] — This note covers the core principles of probabilistic robot localization, including Monte Carlo Localization and Occupancy Grid Mapping, as well as the Simultaneous Localization and Mapping (SLAM) pr… · #robotics #probabilistic-filtering #localization (Generated/CV/probabilistic-robot-localization-and-mapping-20260419-020500.md)
+- [[EKF SLAM vs GraphSLAM Algorithms]] — This note compares the Extended Kalman Filter (EKF) SLAM and GraphSLAM approaches to the simultaneous localization and mapping problem. EKF SLAM is an incremental, proactive algorithm that maintains … · #robotics #slam #kalman-filter (Generated/CV/ekf-slam-vs-graphslam-algorithms-20260419-020522.md)
+- [[Sparse Extended Information Filter]] — The Sparse Extended Information Filter (SEIF) is an efficient online SLAM algorithm that maintains a sparse information matrix to achieve constant-time updates. It uses sparsiﬁcation and relaxation t… · #robotics #slam #information-filter (Generated/CV/sparse-extended-information-filter-20260419-020549.md)
+- [[FastSLAM Algorithm and Variants]] — FastSLAM is a particle filter-based approach to SLAM that exploits the conditional independence of map features given a robot path. It provides efficient online and offline solutions by maintaining s… · #robotics #slam #particle-filters (Generated/CV/fastslam-algorithm-and-variants-20260419-020611.md)
+- [[Markov Decision Processes and POMDPs]] — Markov Decision Processes (MDPs) and Partially Observable Markov Decision Processes (POMDPs) provide mathematical frameworks for probabilistic planning and control under uncertainty. MDPs assume full… · #robotics #probabilistic-planning #decision-processes (Generated/CV/markov-decision-processes-and-pomdps-20260419-020632.md)
+- [[Approximate POMDP And Exploration Techniques]] — This note covers approximate methods for solving Partially Observable Markov Decision Processes (POMDPs) and strategies for robotic exploration. It details algorithms like PBVI, QMDP, and AMDP that r… · #robotics #pomdp #probabilistic-planning (Generated/CV/approximate-pomdp-and-exploration-techniques-20260419-020659.md)
+- [[Robotic Exploration Strategies and SLAM Integration]] — This note covers the methodologies for autonomous robot exploration, ranging from greedy single-robot techniques to coordinated multi-robot systems and SLAM-integrated exploration. It explains how ro… · #robotics #slam #exploration-algorithms (Generated/CV/robotic-exploration-strategies-and-slam-integration-20260419-020721.md)
