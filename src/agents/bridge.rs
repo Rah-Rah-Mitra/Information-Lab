@@ -27,6 +27,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
@@ -150,6 +151,7 @@ fn critique_schema() -> Value {
 pub struct BridgeFinderAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     search: LiteratureSearchAgent,
     max_iters: u8,
     tau: f32,
@@ -159,6 +161,7 @@ impl BridgeFinderAgent {
     pub fn new(
         cfg: &Config,
         limiter: Arc<Limiter>,
+        db: Db,
         search: LiteratureSearchAgent,
     ) -> AppResult<Self> {
         let model = cfg.model_for_role(&cfg.bridge_model);
@@ -172,6 +175,7 @@ impl BridgeFinderAgent {
         Ok(Self {
             llm,
             limiter,
+            db,
             search,
             max_iters: cfg.bridge_max_iters,
             tau: cfg.bridge_confidence_tau,
@@ -270,13 +274,14 @@ impl BridgeFinderAgent {
         let prompt = format!(
             "{BRIDGE_FINDER_SKILL}\n\n# Role\nCRITIQUE\n\n# Current proposal\n{current}\n"
         );
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "bridge_critique".into(),
             description: Some("Bridge critique".into()),
             schema: Some(critique_schema()),
             strict: Some(true),
         };
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -285,6 +290,18 @@ impl BridgeFinderAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty critique".into()))?;
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Bridge,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: Some("{\"step\":\"critique\"}"),
+                started,
+            },
+        )
+        .await;
         serde_json::from_str(&text)
             .map_err(|e| AppError::Schema(format!("parse critique: {e} :: {}", truncate(&text, 400))))
     }
@@ -301,6 +318,7 @@ impl BridgeFinderAgent {
             schema: Some(proposal_schema()),
             strict: Some(true),
         };
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -309,6 +327,19 @@ impl BridgeFinderAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty bridge response".into()))?;
+        let payload = format!("{{\"schema\":\"{schema_name}\"}}");
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Bridge,
+                input: prompt,
+                output: &text,
+                thinking: None,
+                payload_json: Some(&payload),
+                started,
+            },
+        )
+        .await;
         serde_json::from_str(&text)
             .map_err(|e| AppError::Schema(format!("parse proposal: {e} :: {}", truncate(&text, 400))))
     }

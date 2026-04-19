@@ -18,6 +18,7 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
@@ -79,12 +80,13 @@ fn derivation_schema() -> Value {
 pub struct DerivationChainAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     #[allow(dead_code)]
     model: String,
 }
 
 impl DerivationChainAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         let model = cfg.model_for_role(&cfg.derivation_model);
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
@@ -93,7 +95,7 @@ impl DerivationChainAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build derivation llm: {e}")))?;
-        Ok(Self { llm, limiter, model })
+        Ok(Self { llm, limiter, db, model })
     }
 
     #[tracing::instrument(
@@ -128,7 +130,7 @@ impl DerivationChainAgent {
              # Candidate formulas\n{formulas_block}"
         );
 
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "derivation_chain".into(),
             description: Some("Linear derivation chain over candidate formulas".into()),
@@ -136,6 +138,7 @@ impl DerivationChainAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -144,6 +147,18 @@ impl DerivationChainAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty derivation response".into()))?;
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Derivation,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await;
         let parsed: DerivationChainNote = serde_json::from_str(&text).map_err(|e| {
             AppError::Schema(format!("parse derivation: {e} :: {}", truncate(&text, 400)))
         })?;

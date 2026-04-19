@@ -16,6 +16,12 @@ Two-axis navigation. **Sources** lists every textbook ingested; **Topics** is th
 - [[OR]] (Sources/OR.md)
 ## Topics
 
+- [[sparse-methods]] — #sparse-methods (Topics/sparse-methods.md)
+- [[iterative-methods]] — #iterative-methods (Topics/iterative-methods.md)
+- [[parameter-estimation]] — #parameter-estimation (Topics/parameter-estimation.md)
+- [[3d-transformations]] — #3d-transformations (Topics/3d-transformations.md)
+- [[academic-references]] — #academic-references (Topics/academic-references.md)
+- [[research-landscape]] — #research-landscape (Topics/research-landscape.md)
 - [[segmentation]] — #segmentation (Topics/segmentation.md)
 - [[object-detection]] — #object-detection (Topics/object-detection.md)
 - [[image-classification]] — #image-classification (Topics/image-classification.md)

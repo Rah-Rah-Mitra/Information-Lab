@@ -18,11 +18,12 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
 
-use super::{truncate, KG_EXTRACTOR_SKILL, OBSIDIAN_WRITER_SKILL};
+use super::{record_agent_call, scrub_llm_text, truncate, AgentCall, KG_EXTRACTOR_SKILL, OBSIDIAN_WRITER_SKILL};
 
 // ----------------------------------------------------------------------------
 // Output schema
@@ -87,11 +88,12 @@ fn kg_schema() -> Value {
 pub struct KnowledgeGraphAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     model: String,
 }
 
 impl KnowledgeGraphAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
             .model(cfg.light_model.clone())
@@ -103,6 +105,7 @@ impl KnowledgeGraphAgent {
         Ok(Self {
             llm,
             limiter,
+            db,
             model: cfg.light_model.clone(),
         })
     }
@@ -127,12 +130,9 @@ impl KnowledgeGraphAgent {
         let _permit = self.limiter.admit(Role::Extractor).await?;
 
         let system = format!("{KG_EXTRACTOR_SKILL}\n\n---\n\n{OBSIDIAN_WRITER_SKILL}");
+        let user_content = format!("{system}\n\n---\n\n# Input documents\n\n{batched_text}");
 
-        let messages = vec![
-            ChatMessage::user()
-                .content(format!("{system}\n\n---\n\n# Input documents\n\n{batched_text}"))
-                .build(),
-        ];
+        let messages = vec![ChatMessage::user().content(user_content.clone()).build()];
 
         let schema = StructuredOutputFormat {
             name: "kg_output".to_string(),
@@ -141,6 +141,7 @@ impl KnowledgeGraphAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -151,11 +152,27 @@ impl KnowledgeGraphAgent {
             .text()
             .ok_or_else(|| AppError::Schema("empty chat response".into()))?;
 
+        let (tokens_sent, tokens_received) = record_agent_call(
+            &self.db,
+            AgentCall {
+                role: Role::Extractor,
+                input: &user_content,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await?;
+
         let mut parsed: KgOutput = serde_json::from_str(&text)
             .map_err(|e| AppError::Schema(format!("parse kg json: {e} :: {}", truncate(&text, 400))))?;
 
-        parsed.tokens_sent = 0;
-        parsed.tokens_received = 0;
+        parsed.title = scrub_llm_text(&parsed.title);
+        parsed.summary = scrub_llm_text(&parsed.summary);
+        parsed.markdown_snippet = scrub_llm_text(&parsed.markdown_snippet);
+        parsed.tokens_sent = tokens_sent;
+        parsed.tokens_received = tokens_received;
         debug!(bytes = text.len(), "kg extraction ok");
         Ok(parsed)
     }

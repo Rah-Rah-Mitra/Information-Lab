@@ -15,10 +15,20 @@ prove, do not comment on what the formulas mean.
    combine two lines of display math into one.
 3. **Normalise encoding.** `∑` → `\sum`, `∫` → `\int`, `∂` → `\partial`,
    `α β γ` → `\alpha \beta \gamma`, Greek capitals likewise. Keep the
-   result as clean LaTeX that compiles with `amsmath`.
-4. **No invented context.** If you cannot confidently caption a formula
+   result as clean LaTeX that compiles with `amsmath` + `amssymb`.
+4. **Preserve matrices and vectors verbatim.** Bold identifiers stay as
+   `\mathbf{X}`, `\mathbf{P}`, `\boldsymbol{\theta}`. Stacked matrix /
+   vector layouts become `\begin{pmatrix}…\end{pmatrix}` (or `bmatrix`
+   if the source uses square brackets). Row separators are `\\`,
+   column separators are `&`. Never flatten a matrix into an inline
+   product.
+5. **No invented context.** If you cannot confidently caption a formula
    in one short phrase from the surrounding sentence, use `""`.
-5. If there are zero formulas in the input, return `{"formulas": []}`.
+6. **No chat-template tokens, no control characters.** Never emit
+   `<start_of_turn>`, `<end_of_turn>`, `<|turn>`, `<|channel>`,
+   `<|think|>`, `<|tool>`, NUL bytes (`\u0000`), or any replacement
+   characters (`\uFFFD`). These are runtime tokens, not LaTeX.
+7. If there are zero formulas in the input, return `{"formulas": []}`.
 
 ## 2. Output schema
 

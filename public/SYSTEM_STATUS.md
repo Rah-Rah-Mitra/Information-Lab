@@ -1,6 +1,6 @@
 # System Status
 
-_Updated: 2026-04-19T02:22:11.752898200+00:00_
+_Updated: 2026-04-19T04:06:19.359473300+00:00_
 
 ## Queue
 
@@ -10,7 +10,7 @@ _Updated: 2026-04-19T02:22:11.752898200+00:00_
 
 | Metric | Value |
 | --- | --- |
-| Reasoner calls | 74 |
+| Reasoner calls | 79 |
 | Vision calls | 0 |
 | Tokens sent | 0 |
 | Tokens received | 0 |
@@ -19,10 +19,10 @@ _Updated: 2026-04-19T02:22:11.752898200+00:00_
 
 | Source | Progress | Done/Total | Pending | Batched | Errors | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| CV | `██████████`  96.8% | 241/249 | 0 | 0 | 8 | errors |
-| CV | `████████░░`  82.1% | 289/352 | 0 | 0 | 63 | complete |
+| CV | `██████████`  99.2% | 247/249 | 0 | 0 | 0 | complete |
+| CV | `██████████` 100.0% | 352/352 | 0 | 0 | 0 | complete |
 | CV | `██████████` 100.0% | 48/48 | 0 | 0 | 0 | complete |
-| CV | `█████████░`  88.7% | 549/619 | 0 | 0 | 50 | complete |
+| CV | `█████████░`  93.5% | 579/619 | 0 | 0 | 0 | complete |
 | GIS | `██████████` 100.0% | 86/86 | 0 | 0 | 0 | complete |
 | GIS | `██████████` 100.0% | 10/10 | 0 | 0 | 0 | complete |
 | OR | `██████████` 100.0% | 271/271 | 0 | 0 | 0 | complete |

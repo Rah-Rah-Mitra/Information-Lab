@@ -4,17 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "a90dcaf2f92168dd",
+        "id": "0361918540ef44ed",
         "type": "tabs",
         "children": [
           {
-            "id": "e29f4322885aac29",
+            "id": "5cb606131813081b",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "Generated/CV/cheirality-and-critical-configurations-20260419-015542.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "cheirality-and-critical-configurations-20260419-015542"
             }
           }
         ]
@@ -74,7 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 648.5
+    "width": 545.5
   },
   "right": {
     "id": "7c462a4f07621738",
@@ -176,10 +180,16 @@
       "bases:Create new base": false
     }
   },
-  "active": "21ae019b8a35d10c",
+  "active": "5cb606131813081b",
   "lastOpenFiles": [
-    "Topics/segmentation.md",
+    "Generated/CV/computer-vision-bibliography-and-research-trends-20260419-014054.md",
+    "Generated/CV/machine-learning-paradigms-and-techniques-20260419-012940.md",
+    "Generated/GIS/foundations-of-geographic-information-systems-20260419-012027.md",
+    "Generated/GIS/geospatial-data-models-and-formats-20260419-012048.md",
     "Generated/CV/object-detection-and-segmentation-techniques-20260419-021806.md",
+    "RANSAC.md",
+    "SYSTEM_STATUS.md",
+    "Topics/segmentation.md",
     "Topics/object-detection.md",
     "Topics/image-classification.md",
     "Generated/CV/object-recognition-and-classification-paradigms-20260419-021308.md",
@@ -198,12 +208,6 @@
     "Topics/probabilistic-planning.md",
     "Generated/CV/markov-decision-processes-and-pomdps-20260419-020632.md",
     "Topics/fastslam.md",
-    "Generated/CV/fastslam-algorithm-and-variants-20260419-020611.md",
-    "Topics/sparse-matrix.md",
-    "Topics/information-filter.md",
-    "Generated/CV/sparse-extended-information-filter-20260419-020549.md",
-    "Topics/graph-based-slam.md",
-    "Generated/CV/ekf-slam-vs-graphslam-algorithms-20260419-020522.md",
     "Sources/CV",
     "Topics/computer-vision",
     "Generated/CV",

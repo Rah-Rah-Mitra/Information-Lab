@@ -23,6 +23,7 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
@@ -123,12 +124,13 @@ fn topic_synthesis_schema() -> Value {
 pub struct TopicCuratorAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     #[allow(dead_code)]
     model: String,
 }
 
 impl TopicCuratorAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         let model = cfg.model_for_role(&cfg.curator_model);
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
@@ -137,7 +139,7 @@ impl TopicCuratorAgent {
             .timeout_seconds(120)
             .build()
             .map_err(|e| AppError::other(format!("build curator llm: {e}")))?;
-        Ok(Self { llm, limiter, model })
+        Ok(Self { llm, limiter, db, model })
     }
 
     #[tracing::instrument(
@@ -163,7 +165,7 @@ impl TopicCuratorAgent {
             "{TOPIC_CURATOR_SKILL}\n\n---\n\n# Topic\n{topic}\n\n# Linked notes\n\n{notes_block}"
         );
 
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "topic_synthesis".into(),
             description: Some("Cross-textbook topic synthesis".into()),
@@ -171,6 +173,7 @@ impl TopicCuratorAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -179,6 +182,18 @@ impl TopicCuratorAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty curator response".into()))?;
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Curator,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await;
         let parsed: TopicSynthesis = serde_json::from_str(&text)
             .map_err(|e| AppError::Schema(format!("parse synthesis: {e} :: {}", truncate(&text, 400))))?;
         debug!(formulas = parsed.formulas.len(), "curate ok");

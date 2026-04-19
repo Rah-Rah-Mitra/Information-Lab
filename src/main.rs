@@ -74,22 +74,22 @@ async fn run() -> AppResult<()> {
     let limiter = Limiter::from_config(&cfg)?;
 
     // Core agents.
-    let kg = KnowledgeGraphAgent::new(&cfg, limiter.clone())?;
+    let kg = KnowledgeGraphAgent::new(&cfg, limiter.clone(), db.clone())?;
     let vault = VaultWriter::new(cfg.vault_dir.clone(), cfg.index_entry_cap);
 
     // Research-stack agents. Each wraps its own `Arc<Google>` client
     // keyed on its role's model override, but all share `limiter`.
     let search_agent = LiteratureSearchAgent::new(&cfg, db.clone())?;
-    let curator_agent = TopicCuratorAgent::new(&cfg, limiter.clone())?;
+    let curator_agent = TopicCuratorAgent::new(&cfg, limiter.clone(), db.clone())?;
     let bridge_agent =
-        BridgeFinderAgent::new(&cfg, limiter.clone(), search_agent)?;
+        BridgeFinderAgent::new(&cfg, limiter.clone(), db.clone(), search_agent)?;
     let harvester_agent =
         FormulaHarvesterAgent::new(cfg.vault_dir.clone(), db.clone())?;
     let retrier_agent = ErrorRetrierAgent::new(&cfg, db.clone());
-    let theorem_agent = TheoremProverAgent::new(&cfg, limiter.clone())?;
-    let derivation_agent = DerivationChainAgent::new(&cfg, limiter.clone())?;
-    let report_agent = ReportWriterAgent::new(&cfg, limiter.clone())?;
-    let formula_agent = FormulaExtractorAgent::new(&cfg, limiter.clone())?;
+    let theorem_agent = TheoremProverAgent::new(&cfg, limiter.clone(), db.clone())?;
+    let derivation_agent = DerivationChainAgent::new(&cfg, limiter.clone(), db.clone())?;
+    let report_agent = ReportWriterAgent::new(&cfg, limiter.clone(), db.clone())?;
+    let formula_agent = FormulaExtractorAgent::new(&cfg, limiter.clone(), db.clone())?;
     let scheduler = Scheduler::new(cfg.clone(), db.clone())?;
 
     let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);

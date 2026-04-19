@@ -648,6 +648,10 @@ impl Db {
             UsageKind::Bridge => "bridge_calls",
             UsageKind::Harvester => "harvester_calls",
             UsageKind::Search => "search_calls",
+            UsageKind::Theorem => "theorem_calls",
+            UsageKind::Derivation => "derivation_calls",
+            UsageKind::Report => "report_calls",
+            UsageKind::FormulaExtract => "formula_extract_calls",
         };
         // sqlx doesn't parameterize column names; we built `col` from a closed enum above.
         let sql = format!(
@@ -667,19 +671,77 @@ impl Db {
     pub async fn usage_for(&self, day: NaiveDate) -> AppResult<UsageRow> {
         let key = day.to_string();
         let row: Option<UsageRow> = sqlx::query_as(
-            "SELECT day, reasoner_calls, vision_calls, tokens_sent, tokens_received
+            "SELECT day, reasoner_calls, vision_calls,
+                    curator_calls, bridge_calls, harvester_calls, search_calls,
+                    theorem_calls, derivation_calls, report_calls, formula_extract_calls,
+                    tokens_sent, tokens_received
              FROM api_usage WHERE day = ?",
         )
         .bind(&key)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.unwrap_or(UsageRow {
-            day: key,
-            reasoner_calls: 0,
-            vision_calls: 0,
-            tokens_sent: 0,
-            tokens_received: 0,
-        }))
+        Ok(row.unwrap_or_else(|| UsageRow::zeroed(key)))
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent interaction event log (discrete-event observability).
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_agent_event(
+        &self,
+        trace_id: Option<&str>,
+        span_id: Option<&str>,
+        parent_span_id: Option<&str>,
+        agent_role: &str,
+        event_kind: &str,
+        input_summary: Option<&str>,
+        output_summary: Option<&str>,
+        thinking: Option<&str>,
+        payload_json: Option<&str>,
+        tokens_sent: i64,
+        tokens_received: i64,
+        duration_ms: Option<i64>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO agent_events
+             (trace_id, span_id, parent_span_id, agent_role, event_kind,
+              input_summary, output_summary, thinking, payload_json,
+              tokens_sent, tokens_received, duration_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(trace_id)
+        .bind(span_id)
+        .bind(parent_span_id)
+        .bind(agent_role)
+        .bind(event_kind)
+        .bind(input_summary)
+        .bind(output_summary)
+        .bind(thinking)
+        .bind(payload_json)
+        .bind(tokens_sent)
+        .bind(tokens_received)
+        .bind(duration_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_recent_agent_events(
+        &self,
+        limit: i64,
+    ) -> AppResult<Vec<AgentEventRow>> {
+        Ok(sqlx::query_as(
+            "SELECT id, ts, trace_id, span_id, parent_span_id, agent_role,
+                    event_kind, input_summary, output_summary, thinking,
+                    payload_json, tokens_sent, tokens_received, duration_ms
+             FROM agent_events
+             ORDER BY id DESC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
     }
 }
 
@@ -692,6 +754,10 @@ pub enum UsageKind {
     Bridge,
     Harvester,
     Search,
+    Theorem,
+    Derivation,
+    Report,
+    FormulaExtract,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -715,8 +781,55 @@ pub struct UsageRow {
     pub day: String,
     pub reasoner_calls: i64,
     pub vision_calls: i64,
+    pub curator_calls: i64,
+    pub bridge_calls: i64,
+    pub harvester_calls: i64,
+    pub search_calls: i64,
+    pub theorem_calls: i64,
+    pub derivation_calls: i64,
+    pub report_calls: i64,
+    pub formula_extract_calls: i64,
     pub tokens_sent: i64,
     pub tokens_received: i64,
+}
+
+impl UsageRow {
+    fn zeroed(day: String) -> Self {
+        Self {
+            day,
+            reasoner_calls: 0,
+            vision_calls: 0,
+            curator_calls: 0,
+            bridge_calls: 0,
+            harvester_calls: 0,
+            search_calls: 0,
+            theorem_calls: 0,
+            derivation_calls: 0,
+            report_calls: 0,
+            formula_extract_calls: 0,
+            tokens_sent: 0,
+            tokens_received: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct AgentEventRow {
+    pub id: i64,
+    pub ts: String,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub parent_span_id: Option<String>,
+    pub agent_role: String,
+    pub event_kind: String,
+    pub input_summary: Option<String>,
+    pub output_summary: Option<String>,
+    pub thinking: Option<String>,
+    pub payload_json: Option<String>,
+    pub tokens_sent: i64,
+    pub tokens_received: i64,
+    pub duration_ms: Option<i64>,
 }
 
 // Surface an explicit conversion target for tests/bin crates.

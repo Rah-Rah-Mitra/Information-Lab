@@ -21,6 +21,7 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
@@ -96,12 +97,13 @@ fn theorem_schema() -> Value {
 pub struct TheoremProverAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     #[allow(dead_code)]
     model: String,
 }
 
 impl TheoremProverAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         let model = cfg.model_for_role(&cfg.theorem_model);
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
@@ -110,7 +112,7 @@ impl TheoremProverAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build theorem llm: {e}")))?;
-        Ok(Self { llm, limiter, model })
+        Ok(Self { llm, limiter, db, model })
     }
 
     #[tracing::instrument(
@@ -156,7 +158,7 @@ impl TheoremProverAgent {
             fb = formulas_block,
         );
 
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "theorem_note".into(),
             description: Some("Formal-style proof sketch bridging two topics".into()),
@@ -164,6 +166,7 @@ impl TheoremProverAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -172,6 +175,18 @@ impl TheoremProverAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty theorem response".into()))?;
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Theorem,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await;
         let parsed: TheoremNote = serde_json::from_str(&text).map_err(|e| {
             AppError::Schema(format!("parse theorem: {e} :: {}", truncate(&text, 400)))
         })?;

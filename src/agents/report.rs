@@ -17,6 +17,7 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
@@ -77,12 +78,13 @@ fn report_schema() -> Value {
 pub struct ReportWriterAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     #[allow(dead_code)]
     model: String,
 }
 
 impl ReportWriterAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         let model = cfg.model_for_role(&cfg.report_model);
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
             .api_key(cfg.api_key.clone())
@@ -91,7 +93,7 @@ impl ReportWriterAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build report llm: {e}")))?;
-        Ok(Self { llm, limiter, model })
+        Ok(Self { llm, limiter, db, model })
     }
 
     #[tracing::instrument(
@@ -126,7 +128,7 @@ impl ReportWriterAgent {
              # Items produced in the last 24h\n{inputs_block}"
         );
 
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "daily_report".into(),
             description: Some("Prose report summarising the day's research output".into()),
@@ -134,6 +136,7 @@ impl ReportWriterAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -142,6 +145,18 @@ impl ReportWriterAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty report response".into()))?;
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::Report,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await;
         let parsed: DailyReport = serde_json::from_str(&text).map_err(|e| {
             AppError::Schema(format!("parse report: {e} :: {}", truncate(&text, 400)))
         })?;

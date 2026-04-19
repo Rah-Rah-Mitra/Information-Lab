@@ -26,11 +26,12 @@ use tracing::debug;
 
 use crate::{
     config::Config,
+    db::Db,
     error::{AppError, AppResult},
     limiter::{Limiter, Role},
 };
 
-use super::truncate;
+use super::{scrub_llm_text, truncate};
 
 pub const FORMULA_EXTRACTOR_SKILL: &str =
     include_str!("../../skills/formula_extractor.md");
@@ -74,12 +75,13 @@ fn formula_schema() -> Value {
 pub struct FormulaExtractorAgent {
     llm: Arc<Google>,
     limiter: Arc<Limiter>,
+    db: Db,
     #[allow(dead_code)]
     model: String,
 }
 
 impl FormulaExtractorAgent {
-    pub fn new(cfg: &Config, limiter: Arc<Limiter>) -> AppResult<Self> {
+    pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         // Light-tier default (Gemma 4 26B); honour override.
         let model = cfg.model_for_override(&cfg.formula_model, &cfg.light_model);
         let llm: Arc<Google> = LLMBuilder::<Google>::new()
@@ -89,7 +91,7 @@ impl FormulaExtractorAgent {
             .timeout_seconds(90)
             .build()
             .map_err(|e| AppError::other(format!("build formula llm: {e}")))?;
-        Ok(Self { llm, limiter, model })
+        Ok(Self { llm, limiter, db, model })
     }
 
     #[tracing::instrument(
@@ -119,7 +121,7 @@ impl FormulaExtractorAgent {
             "{FORMULA_EXTRACTOR_SKILL}\n\n---\n\n# Chunk text\n\n{body}"
         );
 
-        let messages = vec![ChatMessage::user().content(prompt).build()];
+        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "formula_extract".into(),
             description: Some("Salvaged LaTeX formulas from a math-dense chunk".into()),
@@ -127,6 +129,7 @@ impl FormulaExtractorAgent {
             strict: Some(true),
         };
 
+        let started = std::time::Instant::now();
         let resp = self
             .llm
             .chat(&messages, Some(schema))
@@ -135,13 +138,62 @@ impl FormulaExtractorAgent {
         let text = resp
             .text()
             .ok_or_else(|| AppError::Schema("empty formula response".into()))?;
-        let parsed: FormulaExtractOutput = serde_json::from_str(&text).map_err(|e| {
+        let _ = super::record_agent_call(
+            &self.db,
+            super::AgentCall {
+                role: Role::FormulaExtractor,
+                input: &prompt,
+                output: &text,
+                thinking: None,
+                payload_json: None,
+                started,
+            },
+        )
+        .await;
+        let mut parsed: FormulaExtractOutput = serde_json::from_str(&text).map_err(|e| {
             AppError::Schema(format!(
                 "parse formula: {e} :: {}",
                 truncate(&text, 400)
             ))
         })?;
-        debug!(count = parsed.formulas.len(), "formula extract ok");
+        let before = parsed.formulas.len();
+        parsed.formulas.retain_mut(|f| {
+            f.latex = sanitize_latex(&f.latex);
+            f.context_caption = sanitize_text(&f.context_caption);
+            f.symbols = f
+                .symbols
+                .iter()
+                .map(|s| sanitize_text(s))
+                .filter(|s| !s.is_empty())
+                .collect();
+            !f.latex.is_empty()
+        });
+        debug!(
+            count = parsed.formulas.len(),
+            dropped = before - parsed.formulas.len(),
+            "formula extract ok"
+        );
         Ok(parsed)
     }
+}
+
+/// Strip NUL / chat-template leakage and collapse whitespace runs that a
+/// stripped token sometimes leaves behind.
+fn sanitize_latex(s: &str) -> String {
+    let cleaned = scrub_llm_text(s);
+    let mut out = String::with_capacity(cleaned.len());
+    let mut prev_space = false;
+    for ch in cleaned.chars() {
+        let is_space = ch == ' ' || ch == '\t';
+        if is_space && prev_space {
+            continue;
+        }
+        prev_space = is_space;
+        out.push(ch);
+    }
+    out.trim().to_string()
+}
+
+fn sanitize_text(s: &str) -> String {
+    scrub_llm_text(s)
 }
