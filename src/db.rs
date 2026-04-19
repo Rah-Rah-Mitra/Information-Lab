@@ -354,6 +354,44 @@ impl Db {
         Ok(n)
     }
 
+    /// Bridges at or above `min_confidence` that have no Theorem task yet.
+    pub async fn unproven_bridges(
+        &self,
+        min_confidence: f32,
+        limit: i64,
+    ) -> AppResult<Vec<BridgeRow>> {
+        let rows: Vec<BridgeRow> = sqlx::query_as(
+            "SELECT topic_a, topic_b, source_a, source_b, confidence, note_rel_path
+             FROM bridges
+             WHERE confidence >= ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_tasks
+                   WHERE kind = 'Theorem'
+                     AND json_extract(payload, '$.bridge_rel_path') = bridges.note_rel_path
+               )
+             ORDER BY confidence DESC
+             LIMIT ?",
+        )
+        .bind(min_confidence)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Has a Report task already been enqueued for this date (YYYY-MM-DD)?
+    pub async fn report_task_exists_for_date(&self, date: &str) -> AppResult<bool> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_tasks
+             WHERE kind = 'Report'
+               AND json_extract(payload, '$.date') = ?",
+        )
+        .bind(date)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     // -----------------------------------------------------------------------
     // Topic snapshots — scheduler uses delta-vs-snapshot to decide curation.
     // -----------------------------------------------------------------------
@@ -507,6 +545,67 @@ impl Db {
         Ok(())
     }
 
+    /// Reap chunks sitting in `state='error'`:
+    ///
+    /// * Chunks that have hit `retry_max` retries get promoted to
+    ///   `'failed_final'` (terminal — no more retries, but still visible on
+    ///   the status page).
+    /// * Chunks whose `last_retry_at` is `NULL` or older than
+    ///   `backoff_secs` are re-queued: `state='pending'`, `batch_id=NULL`,
+    ///   `last_error=NULL`, `retry_count += 1`, `last_retry_at=now()`.
+    ///
+    /// Returns `(promoted_to_failed_final, requeued)`.
+    pub async fn reap_error_chunks(
+        &self,
+        retry_max: i64,
+        backoff_secs: i64,
+        batch: i64,
+    ) -> AppResult<(u64, u64)> {
+        let mut tx = self.pool.begin().await?;
+
+        // Terminal promotion: exhausted retry budget.
+        let promoted = sqlx::query(
+            "UPDATE chunks
+             SET state = 'failed_final', updated_at = datetime('now')
+             WHERE state = 'error' AND retry_count >= ?",
+        )
+        .bind(retry_max)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        // Requeue: pick up to `batch` chunks whose backoff has elapsed.
+        // SQLite doesn't support UPDATE ... LIMIT by default; gate via
+        // subquery against rowid.
+        let requeued = sqlx::query(
+            "UPDATE chunks
+             SET state = 'pending',
+                 batch_id = NULL,
+                 last_error = NULL,
+                 retry_count = retry_count + 1,
+                 last_retry_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id IN (
+                 SELECT id FROM chunks
+                 WHERE state = 'error'
+                   AND retry_count < ?
+                   AND (last_retry_at IS NULL
+                        OR last_retry_at <= datetime('now', ?))
+                 ORDER BY id
+                 LIMIT ?
+             )",
+        )
+        .bind(retry_max)
+        .bind(format!("-{backoff_secs} seconds"))
+        .bind(batch)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+        tx.commit().await?;
+        Ok((promoted, requeued))
+    }
+
     pub async fn pending_count(&self) -> AppResult<i64> {
         let n: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
@@ -617,10 +716,16 @@ impl From<std::num::TryFromIntError> for AppError {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Theorem/Derivation/Report/FormulaExtract/ErrorRetry wired incrementally.
 pub enum AgentTaskKind {
     Curate,
     Bridge,
     Harvest,
+    Theorem,
+    Derivation,
+    Report,
+    FormulaExtract,
+    ErrorRetry,
 }
 
 impl AgentTaskKind {
@@ -629,6 +734,11 @@ impl AgentTaskKind {
             AgentTaskKind::Curate => "Curate",
             AgentTaskKind::Bridge => "Bridge",
             AgentTaskKind::Harvest => "Harvest",
+            AgentTaskKind::Theorem => "Theorem",
+            AgentTaskKind::Derivation => "Derivation",
+            AgentTaskKind::Report => "Report",
+            AgentTaskKind::FormulaExtract => "FormulaExtract",
+            AgentTaskKind::ErrorRetry => "ErrorRetry",
         }
     }
 }
@@ -644,6 +754,16 @@ pub struct AgentTaskRow {
     pub last_error: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BridgeRow {
+    pub topic_a: String,
+    pub topic_b: String,
+    pub source_a: String,
+    pub source_b: String,
+    pub confidence: f32,
+    pub note_rel_path: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

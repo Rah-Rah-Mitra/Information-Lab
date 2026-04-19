@@ -57,6 +57,9 @@ pub enum Role {
     Curator,
     Bridge,
     Harvester,
+    Theorem,
+    Derivation,
+    Report,
 }
 
 impl Role {
@@ -67,6 +70,9 @@ impl Role {
             Role::Curator,
             Role::Bridge,
             Role::Harvester,
+            Role::Theorem,
+            Role::Derivation,
+            Role::Report,
         ]
     }
 
@@ -76,18 +82,26 @@ impl Role {
             Role::Curator => "curator",
             Role::Bridge => "bridge",
             Role::Harvester => "harvester",
+            Role::Theorem => "theorem",
+            Role::Derivation => "derivation",
+            Role::Report => "report",
         }
     }
 
     /// Which model tier this role runs on.
     ///
     /// Extractor and Harvester are high-volume and tolerate a smaller
-    /// context window, so they live on the Light tier. Curator and Bridge
-    /// do multi-source reasoning and stay on Heavy.
+    /// context window, so they live on the Light tier. Curator, Bridge,
+    /// and the research-layer agents (Theorem, Derivation, Report) all
+    /// run on Heavy.
     pub fn tier(self) -> Tier {
         match self {
             Role::Extractor | Role::Harvester => Tier::Light,
-            Role::Curator | Role::Bridge => Tier::Heavy,
+            Role::Curator
+            | Role::Bridge
+            | Role::Theorem
+            | Role::Derivation
+            | Role::Report => Tier::Heavy,
         }
     }
 }
@@ -128,6 +142,9 @@ impl Limiter {
             (Role::Curator, cfg.role_share_curator),
             (Role::Bridge, cfg.role_share_bridge),
             (Role::Harvester, cfg.role_share_harvester),
+            (Role::Theorem, cfg.role_share_theorem),
+            (Role::Derivation, cfg.role_share_derivation),
+            (Role::Report, cfg.role_share_report),
         ];
         let sum: u32 = shares.iter().map(|(_, s)| *s).sum::<u32>().max(1);
 

@@ -41,6 +41,9 @@ use tracing::{info, instrument, warn};
 
 use crate::agents::bridge::BridgeNote;
 use crate::agents::curator::{Formula, TopicSynthesis};
+use crate::agents::derivation::DerivationChainNote;
+use crate::agents::report::DailyReport;
+use crate::agents::theorem::TheoremNote;
 use crate::agents::KgOutput;
 use crate::error::{AppError, AppResult};
 
@@ -352,6 +355,147 @@ impl VaultWriter {
         ).await {
             warn!(error = %e, "root Formulas registration failed");
         }
+        Ok(abs)
+    }
+
+    /// Write a Theorem note under `Generated/_Theorems/`. Registers under
+    /// both topic indexes and under the root `## Theorems` section.
+    #[instrument(level = "info", skip(self, theorem),
+        fields(a = %theorem.topic_a, b = %theorem.topic_b))]
+    pub async fn write_theorem(&self, theorem: &TheoremNote) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Theorems");
+        fs::create_dir_all(&dir).await?;
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let a_slug = slugify(&theorem.topic_a);
+        let b_slug = slugify(&theorem.topic_b);
+        let filename = format!("{a_slug}__{b_slug}-{ts}.md");
+        let rel = format!("Generated/_Theorems/{filename}");
+        let abs = dir.join(&filename);
+
+        let mut fm = String::new();
+        fm.push_str("---\n");
+        fm.push_str("type: theorem\n");
+        fm.push_str(&format!("topic_a: {}\n", yaml_scalar(&theorem.topic_a)));
+        fm.push_str(&format!("topic_b: {}\n", yaml_scalar(&theorem.topic_b)));
+        fm.push_str(&format!("bridge_rel_path: {}\n",
+            yaml_scalar(&theorem.bridge_rel_path)));
+        fm.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+        fm.push_str("---");
+        let body = format!("{fm}\n\n# {}\n\n{}\n", theorem.title, theorem.markdown_body);
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        for topic in [&theorem.topic_a, &theorem.topic_b] {
+            let tag_slug = slugify(topic);
+            if tag_slug.is_empty() { continue; }
+            let topic_path = self.vault_dir.join(format!("Topics/{tag_slug}.md"));
+            if let Err(e) = upsert_index_entry(
+                &topic_path,
+                &IndexFile {
+                    kind: IndexKind::Topic { tag: topic.clone() },
+                    cap: self.index_entry_cap,
+                },
+                &IndexEntry {
+                    title: format!("Theorem: {}", theorem.title),
+                    summary: trim_summary(&theorem.claim),
+                    rel_path: rel.clone(),
+                    tags: vec!["theorem".to_string()],
+                },
+            ).await {
+                warn!(error = %e, topic = %topic, "theorem topic upsert failed");
+            }
+        }
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Theorems,
+            &rel,
+            &format!("Theorem: {}", theorem.title),
+        ).await {
+            warn!(error = %e, "root Theorems registration failed");
+        }
+        info!(path = %abs.display(), "theorem written");
+        Ok(abs)
+    }
+
+    /// Write a Derivation chain note under `Generated/_Derivations/`.
+    #[instrument(level = "info", skip(self, chain), fields(title = %chain.title))]
+    pub async fn write_derivation(
+        &self,
+        chain: &DerivationChainNote,
+    ) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Derivations");
+        fs::create_dir_all(&dir).await?;
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let slug = slugify(&chain.title);
+        let filename = format!("{slug}-{ts}.md");
+        let rel = format!("Generated/_Derivations/{filename}");
+        let abs = dir.join(&filename);
+
+        let mut fm = String::new();
+        fm.push_str("---\n");
+        fm.push_str("type: derivation\n");
+        fm.push_str(&format!("title: {}\n", yaml_scalar(&chain.title)));
+        fm.push_str(&format!("entry_symbol: {}\n", yaml_scalar(&chain.entry_symbol)));
+        fm.push_str(&format!("exit_symbol: {}\n", yaml_scalar(&chain.exit_symbol)));
+        fm.push_str(&format!("steps: {}\n", chain.steps.len()));
+        fm.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+        fm.push_str("---");
+        let body = format!("{fm}\n\n# {}\n\n{}\n", chain.title, chain.markdown_body);
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Derivations,
+            &rel,
+            &format!("Derivation: {}", chain.title),
+        ).await {
+            warn!(error = %e, "root Derivations registration failed");
+        }
+        info!(path = %abs.display(), "derivation written");
+        Ok(abs)
+    }
+
+    /// Write a daily Report under `Generated/_Reports/{YYYY-MM-DD}.md`.
+    /// Idempotent per day — overwrites if the file already exists.
+    #[instrument(level = "info", skip(self, report), fields(date = %report.date))]
+    pub async fn write_report(&self, report: &DailyReport) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Reports");
+        fs::create_dir_all(&dir).await?;
+        let filename = format!("{}.md", report.date);
+        let rel = format!("Generated/_Reports/{filename}");
+        let abs = dir.join(&filename);
+
+        let mut fm = String::new();
+        fm.push_str("---\n");
+        fm.push_str("type: report\n");
+        fm.push_str(&format!("date: {}\n", yaml_scalar(&report.date)));
+        fm.push_str(&format!("headline: {}\n", yaml_scalar(&report.headline)));
+        fm.push_str(&format!("sections: {}\n", report.sections.len()));
+        fm.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+        fm.push_str("---");
+        let body = format!(
+            "{fm}\n\n# Daily report — {}\n\n*{}*\n\n{}\n",
+            report.date, report.headline, report.markdown_body
+        );
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Reports,
+            &rel,
+            &format!("Report {}", report.date),
+        ).await {
+            warn!(error = %e, "root Reports registration failed");
+        }
+        info!(path = %abs.display(), "report written");
         Ok(abs)
     }
 }
@@ -753,6 +897,9 @@ enum RootSection {
     Syntheses,
     Bridges,
     Formulas,
+    Theorems,
+    Derivations,
+    Reports,
 }
 
 /// Add a link under the given root section if not already present. The root
@@ -783,6 +930,9 @@ async fn register_root_link(
         RootSection::Syntheses => "## Syntheses",
         RootSection::Bridges => "## Bridges",
         RootSection::Formulas => "## Formulas",
+        RootSection::Theorems => "## Theorems",
+        RootSection::Derivations => "## Derivations",
+        RootSection::Reports => "## Reports",
     };
     let line = match section {
         RootSection::Sources => {
@@ -793,7 +943,10 @@ async fn register_root_link(
         }
         RootSection::Syntheses
         | RootSection::Bridges
-        | RootSection::Formulas => {
+        | RootSection::Formulas
+        | RootSection::Theorems
+        | RootSection::Derivations
+        | RootSection::Reports => {
             format!("- [[{display}]] ({rel_path})")
         }
     };
@@ -822,6 +975,9 @@ fn build_root_seed() -> String {
          ## Topics\n\n\
          ## Syntheses\n\n\
          ## Bridges\n\n\
+         ## Theorems\n\n\
+         ## Derivations\n\n\
+         ## Reports\n\n\
          ## Formulas\n\n",
         created = Utc::now().to_rfc3339(),
     )

@@ -12,8 +12,12 @@ use uuid::Uuid;
 use crate::{
     agents::{
         bridge::{BridgeFinderAgent, TopicPair},
-        curator::{NoteRef, TopicCuratorAgent},
+        curator::{Formula, NoteRef, TopicCuratorAgent},
+        derivation::DerivationChainAgent,
         harvester::FormulaHarvesterAgent,
+        report::{ReportInput, ReportWriterAgent},
+        retrier::ErrorRetrierAgent,
+        theorem::{TheoremInput, TheoremProverAgent},
         KnowledgeGraphAgent,
     },
     config::Config,
@@ -295,6 +299,69 @@ impl Orchestrator {
         });
     }
 
+    /// Error-chunk retrier tick. Pure DB work — no LLM call — so this runs
+    /// on its own cadence independent of the reasoner/research ticks.
+    /// Requeued chunks reappear as `'pending'` and the reasoner loop picks
+    /// them up on its next batch claim.
+    pub fn spawn_error_retrier(&self, retrier: ErrorRetrierAgent) {
+        let interval = self.cfg.error_retry_interval;
+        tokio::spawn(async move {
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match retrier.sweep().await {
+                    Ok(out) if out.promoted == 0 && out.requeued == 0 => {}
+                    Ok(out) => {
+                        info!(
+                            promoted = out.promoted,
+                            requeued = out.requeued,
+                            "error retrier sweep"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "error retrier sweep failed");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Heavy-tier research drain. Every `research_interval` tick, pull one
+    /// Theorem + one Derivation + one Report task (each optional) and run
+    /// them in parallel. They share the 31B tier's rate budget through
+    /// `Limiter::admit(Role::*)` inside each agent.
+    pub fn spawn_heavy_research(
+        &self,
+        theorem: TheoremProverAgent,
+        derivation: DerivationChainAgent,
+        report: ReportWriterAgent,
+    ) {
+        let db = self.db.clone();
+        let vault = self.vault.clone();
+        let interval = self.cfg.research_interval;
+        tokio::spawn(async move {
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let th = drain_theorem(&db, &vault, &theorem);
+                let de = drain_derivation(&db, &vault, &derivation);
+                let re = drain_report(&db, &vault, &report);
+                let (rt, rd, rr) = tokio::join!(th, de, re);
+                if let Err(e) = rt {
+                    warn!(error = %e, "theorem drain failed");
+                }
+                if let Err(e) = rd {
+                    warn!(error = %e, "derivation drain failed");
+                }
+                if let Err(e) = rr {
+                    warn!(error = %e, "report drain failed");
+                }
+            }
+        });
+    }
+
     /// Idle scheduler tick. Enqueues Curate / Bridge / Harvest tasks based
     /// on vault deltas and DB snapshots.
     pub fn spawn_idle_scheduler(&self, scheduler: Scheduler) {
@@ -454,6 +521,294 @@ async fn drain_bridge(
         }
     }
     Ok(())
+}
+
+async fn drain_theorem(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    theorem: &TheoremProverAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db.claim_agent_task(AgentTaskKind::Theorem, &batch_id).await? else {
+        return Ok(());
+    };
+    info!(
+        target: "agent.spawn",
+        role = "theorem", tier = "heavy", task_id = task.id, "theorem claimed"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| {
+        payload
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let topic_a = s("topic_a");
+    let topic_b = s("topic_b");
+    let bridge_rel_path = s("bridge_rel_path");
+    if topic_a.is_empty() || topic_b.is_empty() || bridge_rel_path.is_empty() {
+        db.fail_agent_task(task.id, "theorem: missing payload fields")
+            .await?;
+        return Ok(());
+    }
+
+    // Hypothesis and summaries: pull from the bridge note body if available.
+    let vault_dir = vault.vault_dir().to_path_buf();
+    let bridge_abs = vault_dir.join(&bridge_rel_path);
+    let bridge_body = tokio::fs::read_to_string(&bridge_abs)
+        .await
+        .unwrap_or_default();
+    let hypothesis = parse_yaml_string(&bridge_body, "summary").unwrap_or_default();
+
+    let summary_a = summarise_topic_by_tag(vault, &topic_a).await;
+    let summary_b = summarise_topic_by_tag(vault, &topic_b).await;
+
+    let formulas = filter_formulas_for_topics(db, &[&topic_a, &topic_b], vault).await;
+
+    let input = TheoremInput {
+        topic_a: topic_a.clone(),
+        topic_b: topic_b.clone(),
+        bridge_rel_path: bridge_rel_path.clone(),
+        bridge_hypothesis: hypothesis,
+        summary_a,
+        summary_b,
+        formulas,
+    };
+
+    match theorem.prove(&input).await {
+        Ok(note) => {
+            if let Err(e) = vault.write_theorem(&note).await {
+                error!(error = %e, "theorem vault write failed");
+                db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
+            } else {
+                db.finish_agent_task(task.id).await?;
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "theorem failed");
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn drain_derivation(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    derivation: &DerivationChainAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Derivation, &batch_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    info!(
+        target: "agent.spawn",
+        role = "derivation", tier = "heavy", task_id = task.id, "derivation claimed"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let seed_topic = payload
+        .get("seed_topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let notes: Vec<String> = payload
+        .get("notes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if seed_topic.is_empty() || notes.is_empty() {
+        db.fail_agent_task(task.id, "derivation: missing payload fields")
+            .await?;
+        return Ok(());
+    }
+    let all_formulas = db.list_formulas().await?;
+    let formulas: Vec<Formula> = all_formulas
+        .into_iter()
+        .filter(|f| notes.iter().any(|n| n == &f.note_rel_path))
+        .map(|r| Formula {
+            latex: r.latex,
+            symbols: r
+                .symbols
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            context_caption: r.context.unwrap_or_default(),
+            note_rel_path: r.note_rel_path,
+            derived: false,
+        })
+        .collect();
+    if formulas.is_empty() {
+        db.fail_agent_task(task.id, "derivation: no formulas resolvable")
+            .await?;
+        return Ok(());
+    }
+
+    match derivation.chain(&seed_topic, &formulas).await {
+        Ok(chain) => {
+            if let Err(e) = vault.write_derivation(&chain).await {
+                error!(error = %e, "derivation vault write failed");
+                db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
+            } else {
+                db.finish_agent_task(task.id).await?;
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "derivation failed");
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn drain_report(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    report: &ReportWriterAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db.claim_agent_task(AgentTaskKind::Report, &batch_id).await? else {
+        return Ok(());
+    };
+    info!(
+        target: "agent.spawn",
+        role = "report", tier = "heavy", task_id = task.id, "report claimed"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let date = payload
+        .get("date")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if date.is_empty() {
+        db.fail_agent_task(task.id, "report: missing date").await?;
+        return Ok(());
+    }
+
+    // Gather the last 24h of Syntheses / Bridges / Theorems from vault.
+    let inputs = gather_report_inputs(vault).await;
+    if inputs.is_empty() {
+        // Nothing produced in the window — finish silently without an LLM call.
+        db.finish_agent_task(task.id).await?;
+        return Ok(());
+    }
+
+    match report.write(&date, &inputs).await {
+        Ok(r) => {
+            if let Err(e) = vault.write_report(&r).await {
+                error!(error = %e, "report vault write failed");
+                db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
+            } else {
+                db.finish_agent_task(task.id).await?;
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "report failed");
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn summarise_topic_by_tag(vault: &Arc<VaultWriter>, tag: &str) -> String {
+    let abs = vault.vault_dir().join("Topics").join(format!("{tag}.md"));
+    tokio::fs::read_to_string(&abs).await.unwrap_or_default()
+}
+
+async fn filter_formulas_for_topics(
+    db: &Db,
+    topic_tags: &[&str],
+    vault: &Arc<VaultWriter>,
+) -> Vec<Formula> {
+    let mut allowed: std::collections::HashSet<String> = Default::default();
+    for tag in topic_tags {
+        let topic_file = vault
+            .vault_dir()
+            .join("Topics")
+            .join(format!("{tag}.md"));
+        let content = tokio::fs::read_to_string(&topic_file)
+            .await
+            .unwrap_or_default();
+        let re = regex::Regex::new(r"\(([^)]+\.md)\)").unwrap();
+        for caps in re.captures_iter(&content) {
+            allowed.insert(caps.get(1).unwrap().as_str().to_string());
+        }
+    }
+    match db.list_formulas().await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|r| allowed.contains(&r.note_rel_path))
+            .map(|r| Formula {
+                latex: r.latex,
+                symbols: r
+                    .symbols
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                context_caption: r.context.unwrap_or_default(),
+                note_rel_path: r.note_rel_path,
+                derived: false,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn gather_report_inputs(vault: &Arc<VaultWriter>) -> Vec<ReportInput> {
+    let root = vault.vault_dir().join("Generated");
+    let kinds = [
+        ("synthesis", "_Syntheses"),
+        ("bridge", "_Bridges"),
+        ("theorem", "_Theorems"),
+    ];
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(86_400))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut out = Vec::new();
+    for (kind, dir_name) in kinds {
+        let dir = root.join(dir_name);
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let md = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let modified = md.modified().unwrap_or(std::time::UNIX_EPOCH);
+            if modified < cutoff {
+                continue;
+            }
+            let content = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+            let title = parse_yaml_string(&content, "title").unwrap_or_default();
+            let summary = parse_yaml_string(&content, "summary").unwrap_or_default();
+            let rel = path
+                .strip_prefix(vault.vault_dir())
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            out.push(ReportInput {
+                kind: kind.to_string(),
+                title,
+                summary,
+                note_rel_path: rel,
+            });
+        }
+    }
+    out
 }
 
 async fn summarise_topic(

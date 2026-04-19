@@ -67,6 +67,114 @@ impl Scheduler {
         let topics = self.scan_topics().await?;
         self.enqueue_curate(&topics).await?;
         self.enqueue_bridges(&topics).await?;
+        self.enqueue_theorems().await?;
+        self.enqueue_derivations(&topics).await?;
+        self.enqueue_report().await?;
+        Ok(())
+    }
+
+    /// Promote high-confidence bridges into Theorem tasks. Dedup by
+    /// `bridges.note_rel_path` — see `Db::unproven_bridges`.
+    async fn enqueue_theorems(&self) -> AppResult<()> {
+        let rows = self
+            .db
+            .unproven_bridges(
+                self.cfg.theorem_confidence_tau,
+                self.cfg.theorem_enqueue_batch,
+            )
+            .await?;
+        for b in rows {
+            let payload = json!({
+                "topic_a": b.topic_a,
+                "topic_b": b.topic_b,
+                "source_a": b.source_a,
+                "source_b": b.source_b,
+                "bridge_rel_path": b.note_rel_path,
+                "confidence": b.confidence,
+            });
+            let id = self
+                .db
+                .enqueue_agent_task(AgentTaskKind::Theorem, &payload)
+                .await?;
+            info!(
+                target: "agent.spawn",
+                role = "theorem",
+                tier = "heavy",
+                task_id = id,
+                bridge = %b.note_rel_path,
+                "theorem enqueued"
+            );
+        }
+        Ok(())
+    }
+
+    /// For each topic with ≥ `derivation_min_formulas` formulas, enqueue at
+    /// most one Derivation seed per tick. Skipped if the queue already has
+    /// a pending Derivation task for this topic.
+    async fn enqueue_derivations(&self, topics: &[TopicView]) -> AppResult<()> {
+        let pending = self
+            .db
+            .agent_task_pending_count(AgentTaskKind::Derivation)
+            .await?;
+        if pending >= 2 {
+            return Ok(());
+        }
+        let formulas = self.db.list_formulas().await?;
+        for t in topics {
+            let count = formulas
+                .iter()
+                .filter(|f| t.notes.contains(&f.note_rel_path))
+                .count();
+            if count < self.cfg.derivation_min_formulas {
+                continue;
+            }
+            let note_paths: Vec<String> = formulas
+                .iter()
+                .filter(|f| t.notes.contains(&f.note_rel_path))
+                .map(|f| f.note_rel_path.clone())
+                .collect();
+            let payload = json!({
+                "seed_topic": t.tag,
+                "notes": note_paths,
+            });
+            let id = self
+                .db
+                .enqueue_agent_task(AgentTaskKind::Derivation, &payload)
+                .await?;
+            info!(
+                target: "agent.spawn",
+                role = "derivation",
+                tier = "heavy",
+                task_id = id,
+                topic = %t.tag,
+                formulas = count,
+                "derivation enqueued"
+            );
+            break; // one seed per tick
+        }
+        Ok(())
+    }
+
+    /// One Report task per calendar day — dedup via `Db::report_task_exists_for_date`.
+    async fn enqueue_report(&self) -> AppResult<()> {
+        let _ = self.cfg.report_interval_secs; // cadence read for future fine-grain scheduling
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        if self.db.report_task_exists_for_date(&today).await? {
+            return Ok(());
+        }
+        let payload = json!({ "date": today });
+        let id = self
+            .db
+            .enqueue_agent_task(AgentTaskKind::Report, &payload)
+            .await?;
+        info!(
+            target: "agent.spawn",
+            role = "report",
+            tier = "heavy",
+            task_id = id,
+            date = %today,
+            "report enqueued"
+        );
         Ok(())
     }
 
@@ -80,13 +188,22 @@ impl Scheduler {
                     "topic_rel_path": t.rel_path,
                     "notes": t.notes.iter().cloned().collect::<Vec<_>>(),
                 });
-                self.db
+                let id = self
+                    .db
                     .enqueue_agent_task(AgentTaskKind::Curate, &payload)
                     .await?;
                 self.db
                     .upsert_topic_snapshot(&t.tag, t.entry_count, true)
                     .await?;
-                info!(topic = %t.tag, delta, "curate enqueued");
+                info!(
+                    target: "agent.spawn",
+                    role = "curator",
+                    tier = "heavy",
+                    task_id = id,
+                    topic = %t.tag,
+                    delta,
+                    "curate enqueued"
+                );
             } else {
                 // Refresh the snapshot without marking curated.
                 self.db
@@ -126,10 +243,19 @@ impl Scheduler {
                 "notes_a": a.notes.iter().cloned().collect::<Vec<_>>(),
                 "notes_b": b.notes.iter().cloned().collect::<Vec<_>>(),
             });
-            self.db
+            let id = self
+                .db
                 .enqueue_agent_task(AgentTaskKind::Bridge, &payload)
                 .await?;
-            info!(a = %a.tag, b = %b.tag, "bridge enqueued");
+            info!(
+                target: "agent.spawn",
+                role = "bridge",
+                tier = "heavy",
+                task_id = id,
+                a = %a.tag,
+                b = %b.tag,
+                "bridge enqueued"
+            );
         }
         Ok(())
     }

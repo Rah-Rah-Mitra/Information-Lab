@@ -56,7 +56,11 @@ impl FormulaHarvesterAgent {
         })
     }
 
-    #[tracing::instrument(level = "info", skip(self), fields(max_notes = max_notes))]
+    #[tracing::instrument(
+        level = "info",
+        skip(self),
+        fields(agent.role = "harvester", agent.tier = "light", max_notes = max_notes)
+    )]
     pub async fn harvest(&self, max_notes: usize) -> AppResult<HarvestResult> {
         let root = self.vault_dir.join("Generated");
         if !root.exists() {

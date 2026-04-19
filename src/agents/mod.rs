@@ -16,9 +16,13 @@ use crate::{db::Db, limiter::Limiter, vault::VaultWriter};
 
 pub mod bridge;
 pub mod curator;
+pub mod derivation;
 pub mod extractor;
 pub mod harvester;
+pub mod report;
+pub mod retrier;
 pub mod search;
+pub mod theorem;
 
 pub use extractor::{KgOutput, KnowledgeGraphAgent};
 #[allow(unused_imports)]

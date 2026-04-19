@@ -72,6 +72,9 @@ pub struct Config {
     pub role_share_curator: u32,
     pub role_share_bridge: u32,
     pub role_share_harvester: u32,
+    pub role_share_theorem: u32,
+    pub role_share_derivation: u32,
+    pub role_share_report: u32,
 
     /// Minimum new entries in a Topic index before a curate task is enqueued.
     pub curate_delta_k: usize,
@@ -100,6 +103,28 @@ pub struct Config {
     /// Overrides for per-role models. Blank falls back to `reasoner_model`.
     pub curator_model: String,
     pub bridge_model: String,
+    pub theorem_model: String,
+    pub derivation_model: String,
+    pub report_model: String,
+
+    // ---- ErrorRetrier (reaps chunks stuck in `state='error'`) ----
+    /// Periodic cadence for the retry sweep.
+    pub error_retry_interval: Duration,
+    /// Hard cap on retries before a chunk is promoted to `'failed_final'`.
+    pub error_retry_max: i64,
+    /// Minimum age of `last_retry_at` before a chunk is eligible again.
+    pub error_retry_backoff_secs: i64,
+    /// Max chunks re-queued per sweep.
+    pub error_retry_batch: i64,
+
+    /// Minimum bridge confidence before a Theorem task may be enqueued.
+    pub theorem_confidence_tau: f32,
+    /// Max Theorem tasks enqueued per scheduler tick.
+    pub theorem_enqueue_batch: i64,
+    /// Daily cadence for Report tasks (seconds between enqueue checks).
+    pub report_interval_secs: i64,
+    /// Minimum formulas in a topic before a Derivation seed is enqueued.
+    pub derivation_min_formulas: usize,
 
     // ---- Tavily literature search (used only by Bridge iter 2) ----
     /// API key; blank disables the search agent entirely.
@@ -165,10 +190,13 @@ impl Config {
                 .filter(|s| !s.trim().is_empty()),
 
             rpd_limit: env_parse("RPD_LIMIT", 1500_u32)?,
-            role_share_extractor: env_parse("ROLE_SHARE_EXTRACTOR", 60_u32)?,
-            role_share_curator: env_parse("ROLE_SHARE_CURATOR", 20_u32)?,
-            role_share_bridge: env_parse("ROLE_SHARE_BRIDGE", 15_u32)?,
+            role_share_extractor: env_parse("ROLE_SHARE_EXTRACTOR", 50_u32)?,
+            role_share_curator: env_parse("ROLE_SHARE_CURATOR", 15_u32)?,
+            role_share_bridge: env_parse("ROLE_SHARE_BRIDGE", 12_u32)?,
             role_share_harvester: env_parse("ROLE_SHARE_HARVESTER", 5_u32)?,
+            role_share_theorem: env_parse("ROLE_SHARE_THEOREM", 8_u32)?,
+            role_share_derivation: env_parse("ROLE_SHARE_DERIVATION", 7_u32)?,
+            role_share_report: env_parse("ROLE_SHARE_REPORT", 3_u32)?,
 
             curate_delta_k: env_parse("CURATE_DELTA_K", 5_usize)?,
             bridge_max_pending: env_parse("BRIDGE_MAX_PENDING", 6_usize)?,
@@ -190,6 +218,22 @@ impl Config {
 
             curator_model: env_or("CURATOR_MODEL", ""),
             bridge_model: env_or("BRIDGE_MODEL", ""),
+            theorem_model: env_or("THEOREM_MODEL", ""),
+            derivation_model: env_or("DERIVATION_MODEL", ""),
+            report_model: env_or("REPORT_MODEL", ""),
+
+            error_retry_interval: Duration::from_secs(env_parse(
+                "ERROR_RETRY_INTERVAL_SECS",
+                300_u64,
+            )?),
+            error_retry_max: env_parse("ERROR_RETRY_MAX", 3_i64)?,
+            error_retry_backoff_secs: env_parse("ERROR_RETRY_BACKOFF_SECS", 300_i64)?,
+            error_retry_batch: env_parse("ERROR_RETRY_BATCH", 20_i64)?,
+
+            theorem_confidence_tau: env_parse("THEOREM_CONFIDENCE_TAU", 0.85_f32)?,
+            theorem_enqueue_batch: env_parse("THEOREM_ENQUEUE_BATCH", 2_i64)?,
+            report_interval_secs: env_parse("REPORT_INTERVAL_SECS", 86400_i64)?,
+            derivation_min_formulas: env_parse("DERIVATION_MIN_FORMULAS", 3_usize)?,
 
             tavily_api_key: std::env::var("TAVILY_API_KEY")
                 .ok()

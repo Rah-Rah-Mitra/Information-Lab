@@ -140,7 +140,11 @@ impl TopicCuratorAgent {
         Ok(Self { llm, limiter, model })
     }
 
-    #[tracing::instrument(level = "info", skip(self, notes), fields(topic = %topic, notes = notes.len()))]
+    #[tracing::instrument(
+        level = "info",
+        skip(self, notes),
+        fields(agent.role = "curator", agent.tier = "heavy", topic = %topic, notes = notes.len())
+    )]
     pub async fn curate(&self, topic: &str, notes: &[NoteRef]) -> AppResult<TopicSynthesis> {
         let _permit = self.limiter.admit(Role::Curator).await?;
 

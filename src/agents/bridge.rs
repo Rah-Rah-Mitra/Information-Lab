@@ -179,7 +179,7 @@ impl BridgeFinderAgent {
     }
 
     #[tracing::instrument(level = "info", skip(self, pair),
-        fields(a = %pair.topic_a, b = %pair.topic_b))]
+        fields(agent.role = "bridge", agent.tier = "heavy", a = %pair.topic_a, b = %pair.topic_b))]
     pub async fn run(&self, pair: TopicPair) -> AppResult<Option<BridgeNote>> {
         let mut proposal = self.propose(&pair).await?;
         let mut iters: u8 = 1;
