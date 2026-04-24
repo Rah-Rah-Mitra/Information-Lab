@@ -124,7 +124,7 @@ async fn post_research_request(
     }
     let payload = serde_json::json!({
         "problem": body.problem,
-        "max_iterations": body.max_iterations.unwrap_or(2),
+        "max_iterations": body.max_iterations.unwrap_or(8),
         "skills_scope": body.skills_scope,
         "telegram": {
             "chat_id": body.telegram_chat_id,

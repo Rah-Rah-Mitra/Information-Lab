@@ -13,7 +13,7 @@
 //!
 //! One [`Limiter::admit(Role::FormulaExtractor)`] gate per call.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use autoagents::llm::{
     backends::google::Google,
@@ -80,6 +80,8 @@ pub struct FormulaExtractorAgent {
 }
 
 impl FormulaExtractorAgent {
+    const MAX_REGEN_PASSES: u8 = 3;
+
     pub fn new(cfg: &Config, limiter: Arc<Limiter>, db: Db) -> AppResult<Self> {
         // Light-tier default (Gemma 4 26B); honour override.
         let model = cfg.model_for_override(&cfg.formula_model, &cfg.light_model);
@@ -118,64 +120,100 @@ impl FormulaExtractorAgent {
             chunk_text
         };
 
-        let prompt = format!("{FORMULA_EXTRACTOR_SKILL}\n\n---\n\n# Chunk text\n\n{body}");
+        let mut accepted: Vec<ExtractedFormula> = Vec::new();
+        let mut seen_latex = HashSet::new();
+        let mut failed_render: Vec<String> = Vec::new();
 
-        let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
-        let schema = StructuredOutputFormat {
-            name: "formula_extract".into(),
-            description: Some("Salvaged LaTeX formulas from a math-dense chunk".into()),
-            schema: Some(formula_schema()),
-            strict: Some(true),
-        };
+        for pass in 1..=Self::MAX_REGEN_PASSES {
+            let regen_context = if failed_render.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n# Failed render formulas from previous pass\n{}\n\n\
+                     Regenerate only corrected LaTeX for these formulas. Keep formulas that already render unchanged.",
+                    failed_render
+                        .iter()
+                        .map(|f| format!("- `{f}`"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            let prompt = format!(
+                "{FORMULA_EXTRACTOR_SKILL}\n\n---\n\n# Pass\n{pass}/{max}\n\n# Chunk text\n\n{body}{regen_context}",
+                max = Self::MAX_REGEN_PASSES
+            );
 
-        let started = std::time::Instant::now();
-        let resp = self
-            .llm
-            .chat(&messages, Some(schema))
-            .await
-            .map_err(|e| AppError::other(format!("formula chat: {e}")))?;
-        let text = resp
-            .text()
-            .ok_or_else(|| AppError::Schema("empty formula response".into()))?;
-        let _ = super::record_agent_call(
-            &self.db,
-            super::AgentCall {
-                role: Role::FormulaExtractor,
-                input: &prompt,
-                output: &text,
-                thinking: None,
-                payload_json: None,
-                research_request_id: None,
-                step_index: None,
-                phase: Some("llm_call"),
-                tool_name: None,
-                model_name: None,
-                artifact_path: None,
-                started,
-            },
-        )
-        .await;
-        let mut parsed: FormulaExtractOutput = serde_json::from_str(&text).map_err(|e| {
-            AppError::Schema(format!("parse formula: {e} :: {}", truncate(&text, 400)))
-        })?;
-        let before = parsed.formulas.len();
-        parsed.formulas.retain_mut(|f| {
-            f.latex = sanitize_latex(&f.latex);
-            f.context_caption = sanitize_text(&f.context_caption);
-            f.symbols = f
-                .symbols
-                .iter()
-                .map(|s| sanitize_text(s))
-                .filter(|s| !s.is_empty())
-                .collect();
-            !f.latex.is_empty()
-        });
+            let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
+            let schema = StructuredOutputFormat {
+                name: "formula_extract".into(),
+                description: Some("Salvaged LaTeX formulas from a math-dense chunk".into()),
+                schema: Some(formula_schema()),
+                strict: Some(true),
+            };
+
+            let started = std::time::Instant::now();
+            let resp = self
+                .llm
+                .chat(&messages, Some(schema))
+                .await
+                .map_err(|e| AppError::other(format!("formula chat: {e}")))?;
+            let text = resp
+                .text()
+                .ok_or_else(|| AppError::Schema("empty formula response".into()))?;
+            let _ = super::record_agent_call(
+                &self.db,
+                super::AgentCall {
+                    role: Role::FormulaExtractor,
+                    input: &prompt,
+                    output: &text,
+                    thinking: None,
+                    payload_json: None,
+                    research_request_id: None,
+                    step_index: None,
+                    phase: Some("llm_call"),
+                    tool_name: None,
+                    model_name: None,
+                    artifact_path: None,
+                    started,
+                },
+            )
+            .await;
+            let mut parsed: FormulaExtractOutput = serde_json::from_str(&text).map_err(|e| {
+                AppError::Schema(format!("parse formula: {e} :: {}", truncate(&text, 400)))
+            })?;
+            parsed.formulas.retain_mut(|f| {
+                f.latex = sanitize_latex(&f.latex);
+                f.context_caption = sanitize_text(&f.context_caption);
+                f.symbols = f
+                    .symbols
+                    .iter()
+                    .map(|s| sanitize_text(s))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                !f.latex.is_empty()
+            });
+
+            failed_render.clear();
+            for f in parsed.formulas {
+                if !quick_formula_render_scan(&f.latex) {
+                    failed_render.push(f.latex);
+                    continue;
+                }
+                if seen_latex.insert(f.latex.clone()) {
+                    accepted.push(f);
+                }
+            }
+            if failed_render.is_empty() {
+                break;
+            }
+        }
+
         debug!(
-            count = parsed.formulas.len(),
-            dropped = before - parsed.formulas.len(),
+            count = accepted.len(),
+            failed_render = failed_render.len(),
             "formula extract ok"
         );
-        Ok(parsed)
+        Ok(FormulaExtractOutput { formulas: accepted })
     }
 }
 
@@ -198,4 +236,93 @@ fn sanitize_latex(s: &str) -> String {
 
 fn sanitize_text(s: &str) -> String {
     scrub_llm_text(s)
+}
+
+/// Lightweight pre-render scan for obvious LaTeX breakage that tends to fail
+/// markdown math renderers (KaTeX/MathJax): unmatched braces/delimiters,
+/// dangling escapes, and malformed `\left`/`\right` pairing.
+fn quick_formula_render_scan(latex: &str) -> bool {
+    if latex.trim().is_empty() {
+        return false;
+    }
+    if latex.contains('\n') || latex.contains('\r') || latex.contains('\u{0000}') {
+        return false;
+    }
+
+    let mut braces = 0i32;
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut left_count = 0usize;
+    let mut right_count = 0usize;
+    let mut chars = latex.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek() {
+                Some('\\') => {
+                    chars.next();
+                    continue;
+                }
+                None => return false,
+                _ => {}
+            }
+            let mut cmd = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if c.is_ascii_alphabetic() {
+                    cmd.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if cmd == "left" {
+                left_count += 1;
+            } else if cmd == "right" {
+                right_count += 1;
+            }
+            continue;
+        }
+        match ch {
+            '{' => braces += 1,
+            '}' => {
+                braces -= 1;
+                if braces < 0 {
+                    return false;
+                }
+            }
+            '(' => parens += 1,
+            ')' => {
+                parens -= 1;
+                if parens < 0 {
+                    return false;
+                }
+            }
+            '[' => brackets += 1,
+            ']' => {
+                brackets -= 1;
+                if brackets < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    braces == 0 && parens == 0 && brackets == 0 && left_count == right_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quick_formula_render_scan;
+
+    #[test]
+    fn formula_scan_accepts_balanced_latex() {
+        assert!(quick_formula_render_scan(r"\frac{a+b}{c+d}"));
+        assert!(quick_formula_render_scan(r"\left( x + y \right)^2"));
+    }
+
+    #[test]
+    fn formula_scan_rejects_unbalanced_or_dangling_input() {
+        assert!(!quick_formula_render_scan(r"\frac{a+b}{c+d"));
+        assert!(!quick_formula_render_scan(r"\left( x + y )"));
+        assert!(!quick_formula_render_scan("x + y \\"));
+    }
 }

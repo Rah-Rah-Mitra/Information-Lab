@@ -5,6 +5,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use tokio::{sync::mpsc, time};
 use tracing::{error, info, warn, Instrument};
 use uuid::Uuid;
@@ -83,6 +84,12 @@ pub struct Orchestrator {
     db: Db,
     kg: Arc<KnowledgeGraphAgent>,
     vault: Arc<VaultWriter>,
+}
+
+#[derive(Clone)]
+struct TelegramReplyTarget {
+    chat_id: String,
+    message_id: Option<i64>,
 }
 
 impl Orchestrator {
@@ -441,13 +448,23 @@ impl Orchestrator {
         let db = self.db.clone();
         let vault = self.vault.clone();
         let interval = self.cfg.research_interval;
+        let bot_token = self.cfg.telegram_bot_token.clone();
+        let telegram_api_base = self.cfg.telegram_api_base.clone();
         tokio::spawn(async move {
             time::sleep(Duration::from_secs(12)).await;
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                if let Err(e) = drain_research_request(&db, &vault, &agent).await {
+                if let Err(e) = drain_research_request(
+                    &db,
+                    &vault,
+                    &agent,
+                    bot_token.as_deref(),
+                    &telegram_api_base,
+                )
+                .await
+                {
                     warn!(error = %e, "research request drain failed");
                 }
             }
@@ -1513,6 +1530,8 @@ async fn drain_research_request(
     db: &Db,
     vault: &Arc<VaultWriter>,
     agent: &ResearchRequestAgent,
+    telegram_bot_token: Option<&str>,
+    telegram_api_base: &str,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
     let Some(task) = db
@@ -1567,7 +1586,7 @@ async fn drain_research_request(
         .get("max_iterations")
         .and_then(|v| v.as_u64())
         .unwrap_or(2)
-        .clamp(1, 6) as u8;
+        .clamp(1, 24) as u8;
     let skills_scope: Vec<String> = payload
         .get("skills_scope")
         .and_then(|v| v.as_array())
@@ -1577,6 +1596,7 @@ async fn drain_research_request(
                 .collect()
         })
         .unwrap_or_default();
+    let telegram_target = parse_telegram_target(&payload);
     emit_research_event(
         db,
         ctx,
@@ -1641,61 +1661,160 @@ async fn drain_research_request(
             Some(&artifact.to_string_lossy()),
         )
         .await;
+        let _ = notify_telegram_research_result(
+            telegram_bot_token,
+            telegram_api_base,
+            &telegram_target,
+            "Research request is currently unsolved due to insufficient local knowledge.",
+            Some(&artifact),
+        )
+        .await;
         db.finish_agent_task(task.id).await?;
         return Ok(());
     }
 
-    let rctx = ResearchContext {
-        problem: problem.clone(),
-        max_iterations,
-        skills_scope,
-        topic_context,
-        formula_context,
+    let mut previous_draft: Option<String> = None;
+    let mut final_out: Option<ResearchResult> = None;
+
+    for iter in 1..=max_iterations {
+        let rctx = ResearchContext {
+            problem: problem.clone(),
+            max_iterations,
+            skills_scope: skills_scope.clone(),
+            topic_context: topic_context.clone(),
+            formula_context: formula_context.clone(),
+            iteration_index: iter,
+            prior_report: previous_draft.clone(),
+        };
+        emit_research_event(
+            db,
+            ctx,
+            "llm_call",
+            2 + i64::from(iter),
+            "solve",
+            Some(&format!("iteration {iter}/{max_iterations}")),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let out = match agent.run(&rctx).await {
+            Ok(out) => out,
+            Err(e) => {
+                emit_research_event(
+                    db,
+                    ctx,
+                    "failed",
+                    3 + i64::from(iter),
+                    "failed",
+                    None,
+                    Some(&e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
+                db.fail_agent_task(task.id, &e.to_string()).await?;
+                let _ = notify_telegram_research_result(
+                    telegram_bot_token,
+                    telegram_api_base,
+                    &telegram_target,
+                    "Research request failed. Please check logs and rerun /research or /continue.",
+                    None,
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
+        previous_draft = Some(format!(
+            "title: {}\nsummary: {}\n\n{}",
+            out.title, out.summary, out.markdown_body
+        ));
+        final_out = Some(out);
+    }
+
+    if let Some(out) = final_out {
+        let artifact = vault.write_research(&out).await?;
+        emit_research_event(
+            db,
+            ctx,
+            "finalized",
+            4 + i64::from(max_iterations),
+            "finalize",
+            None,
+            Some("research draft written"),
+            None,
+            Some(&artifact.to_string_lossy()),
+        )
+        .await;
+        let _ = notify_telegram_research_result(
+            telegram_bot_token,
+            telegram_api_base,
+            &telegram_target,
+            &format!(
+                "Research complete after {max_iterations} iterations.\nTitle: {}\nSummary: {}",
+                out.title, out.summary
+            ),
+            Some(&artifact),
+        )
+        .await;
+        db.finish_agent_task(task.id).await?;
+    }
+    Ok(())
+}
+
+fn parse_telegram_target(payload: &serde_json::Value) -> Option<TelegramReplyTarget> {
+    let tg = payload.get("telegram")?;
+    let chat_id = tg.get("chat_id")?.as_str()?.to_string();
+    let message_id = tg.get("message_id").and_then(|v| v.as_i64());
+    Some(TelegramReplyTarget {
+        chat_id,
+        message_id,
+    })
+}
+
+async fn notify_telegram_research_result(
+    token: Option<&str>,
+    api_base: &str,
+    target: &Option<TelegramReplyTarget>,
+    message: &str,
+    artifact_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let Some(token) = token else {
+        return Ok(());
     };
-    emit_research_event(
-        db,
-        ctx,
-        "llm_call",
-        3,
-        "solve",
-        Some(&problem),
-        None,
-        None,
-        None,
-    )
-    .await;
-    match agent.run(&rctx).await {
-        Ok(out) => {
-            let artifact = vault.write_research(&out).await?;
-            emit_research_event(
-                db,
-                ctx,
-                "finalized",
-                4,
-                "finalize",
-                None,
-                Some("research draft written"),
-                None,
-                Some(&artifact.to_string_lossy()),
-            )
-            .await;
-            db.finish_agent_task(task.id).await?;
-        }
-        Err(e) => {
-            emit_research_event(
-                db,
-                ctx,
-                "failed",
-                4,
-                "failed",
-                None,
-                Some(&e.to_string()),
-                None,
-                None,
-            )
-            .await;
-            db.fail_agent_task(task.id, &e.to_string()).await?;
-        }
+    let Some(target) = target else {
+        return Ok(());
+    };
+
+    let base = api_base.trim_end_matches('/');
+    let send_msg_url = format!("{base}/bot{token}/sendMessage");
+    let client = reqwest::Client::new();
+    let mut body = serde_json::json!({
+        "chat_id": target.chat_id,
+        "text": message,
+    });
+    if let Some(reply_to) = target.message_id {
+        body["reply_to_message_id"] = serde_json::json!(reply_to);
+    }
+    client
+        .post(&send_msg_url)
+        .json(&body)
+        .send()
+        .await
+        .context("send telegram message")?;
+
+    if let Some(path) = artifact_path {
+        let followup = serde_json::json!({
+            "chat_id": target.chat_id,
+            "text": format!("Research artifact saved at: {}", path.display())
+        });
+        client
+            .post(&send_msg_url)
+            .json(&followup)
+            .send()
+            .await
+            .context("send telegram artifact path")?;
     }
     Ok(())
 }
