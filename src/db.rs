@@ -815,6 +815,31 @@ impl Db {
         .await?)
     }
 
+    pub async fn list_research_summaries(
+        &self,
+        limit: i64,
+    ) -> AppResult<Vec<ResearchExecutionListItem>> {
+        Ok(sqlx::query_as(
+            "SELECT
+                research_request_id,
+                MIN(ts) AS first_ts,
+                MAX(ts) AS last_ts,
+                MAX(CASE WHEN event_kind='finalized' THEN 1 ELSE 0 END) AS finalized,
+                MAX(CASE WHEN event_kind='failed' THEN 1 ELSE 0 END) AS failed,
+                COUNT(*) AS event_count,
+                COALESCE(SUM(tokens_sent), 0) AS total_tokens_sent,
+                COALESCE(SUM(tokens_received), 0) AS total_tokens_received
+             FROM agent_events
+             WHERE research_request_id IS NOT NULL
+             GROUP BY research_request_id
+             ORDER BY MAX(id) DESC
+             LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     fn sanitize_thinking(&self, thinking: Option<&str>) -> Option<String> {
         let thinking = thinking?;
         match self.thinking_policy {
@@ -955,6 +980,18 @@ pub struct ResearchSummary {
     pub finalized: i64,
     pub failed: i64,
     pub event_count: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct ResearchExecutionListItem {
+    pub research_request_id: String,
+    pub first_ts: String,
+    pub last_ts: String,
+    pub finalized: i64,
+    pub failed: i64,
+    pub event_count: i64,
+    pub total_tokens_sent: i64,
+    pub total_tokens_received: i64,
 }
 
 // Surface an explicit conversion target for tests/bin crates.

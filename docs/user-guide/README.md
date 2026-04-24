@@ -134,6 +134,8 @@ If API bind is valid and available, the service exposes:
 - `POST /research/request`
 - `GET /research/{id}`
 - `GET /research/{id}/events`
+- `GET /monitor/executions?limit=20`
+- `GET /monitor/executions/{id}`
 
 Default bind is `127.0.0.1:8090` unless `RESEARCH_API_BIND` overrides it.
 Internal clients (like the Telegram bot) use `RESEARCH_REQUEST_ENDPOINT` (default `http://127.0.0.1:8090/research/request`).
