@@ -20,6 +20,32 @@ cargo run
 
 Then drop PDFs into your configured `WATCH_DIR` and inspect output in `VAULT_DIR`.
 
+### Run a research request now
+
+Submit a minimal ad-hoc request:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/research/request \
+  -H 'content-type: application/json' \
+  -d '{"problem":"Summarize the strongest evidence for retrieval-augmented generation in this vault."}'
+```
+
+The API returns `202 Accepted` with a `task_id` (for example, `{"task_id": 42, "status": "queued"}`).
+Use that `task_id` in follow-up reads:
+
+```bash
+curl -sS http://127.0.0.1:8090/research/42
+curl -sS http://127.0.0.1:8090/research/42/events
+```
+
+Expected lifecycle at a glance: `queued` → `running` → `completed` or `failed`.
+When a request finishes (including gate-declined requests), the generated markdown artifact is written to:
+
+- `VAULT_DIR/Generated/_Research/*.md` for ad-hoc research outputs.
+- `VAULT_DIR/Generated/_Reports/*.md` for scheduled daily reports.
+
+> Note on solvability gate: requests are checked against local vault coverage first. If knowledge coverage is too low, the run is declined early as `UNSOLVABLE_INSUFFICIENT_KNOWLEDGE` and still emits a research artifact explaining what is missing.
+
 ## Runtime feature set
 
 ### Ingest and extraction
