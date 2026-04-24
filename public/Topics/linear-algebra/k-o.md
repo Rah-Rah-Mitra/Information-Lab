@@ -1,0 +1,19 @@
+---
+type: index
+index_kind: topic
+title: "linear-algebra"
+created: 2026-04-24T09:16:44.824060400+00:00
+---
+
+# linear-algebra (bucket `k-o`)
+
+Notes tagged **#linear-algebra**, aggregated across every source in this library. This is the cross-textbook view of the topic.
+
+- [[Matrix Canonical Forms and Spectral Properties]] — This note explores the fundamental canonical forms of square matrices, including the Jordan and Schur forms, and examines the relationship between their spectra and matrix properties. It details how … · #linear-algebra #matrix-theory #spectral-analysis (Generated/OR/matrix-canonical-forms-and-spectral-properties-20260424-082814.md)
+- [[Matrix Theory and Partial Differential Equations]] — This note covers fundamental concepts in matrix theory, including eigenvalue characterization, nonnegative matrices, and projectors, alongside an introduction to partial differential equations. It pr… · #linear-algebra #matrix-theory #partial-differential-equations (Generated/LA/matrix-theory-and-partial-differential-equations-20260424-082843.md)
+- [[Krylov Subspace Projection Methods]] — Krylov subspace methods are iterative techniques for solving large, sparse linear systems by projecting the problem onto a subspace. These methods include GMRES, Conjugate Gradient, and Lanczos algor… · #linear-algebra #iterative-methods #krylov-subspace (Generated/LA/krylov-subspace-projection-methods-20260424-083810.md)
+- [[Krylov Subspace Methods and Chebyshev Polynomials]] — This note explores the convergence properties and algorithmic variations of Krylov subspace methods, including GMRES, FOM, and Conjugate Gradient. It highlights the role of Chebyshev polynomials in a… · #linear-algebra #krylov-subspace-methods #chebyshev-polynomials (Generated/LA/krylov-subspace-methods-and-chebyshev-polynomials-20260424-083839.md)
+- [[Linear Algebra Fundamentals and Sparse Matrix Storage]] — This note covers the foundational concepts of complex vector spaces, matrix properties, and various sparse matrix storage formats. It explains the mathematical basis for iterative methods and the str… · #linear-algebra #sparse-matrices #numerical-analysis (Generated/LA/linear-algebra-fundamentals-and-sparse-matrix-storage-20260424-083902.md)
+- [[Krylov Subspace Projection Methods]] — Krylov subspace methods are iterative solvers for large linear systems that use projection techniques to find approximate solutions. These methods include FOM, GMRES, and Lanczos, each differing in t… · #linear-algebra #iterative-solvers #krylov-subspace-methods (Generated/LA/krylov-subspace-projection-methods-20260424-083926.md)
+- [[Krylov Subspace Methods and Sparse Matrix Storage]] — Krylov subspace methods are iterative solvers used for large, sparse linear systems. They rely on efficient matrix-vector products and are often enhanced by preconditioning to accelerate convergence.… · #linear-algebra #numerical-linear-algebra #sparse-matrices (Generated/LA/krylov-subspace-methods-and-sparse-matrix-storage-20260424-091303.md)
+- [[Least Squares Problems and Numerical Stability]] — Least squares problems aim to minimize the norm of the residual in linear systems, often solved via normal equations, QR factorization, or SVD. The accuracy of these solutions depends heavily on the … · #linear-algebra #numerical-analysis #least-squares (Generated/LA/least-squares-problems-and-numerical-stability-20260424-091731.md)
