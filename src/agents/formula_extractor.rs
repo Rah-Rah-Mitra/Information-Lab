@@ -33,8 +33,7 @@ use crate::{
 
 use super::{scrub_llm_text, truncate};
 
-pub const FORMULA_EXTRACTOR_SKILL: &str =
-    include_str!("../../skills/formula_extractor.md");
+pub const FORMULA_EXTRACTOR_SKILL: &str = include_str!("../../skills/formula_extractor.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedFormula {
@@ -91,7 +90,12 @@ impl FormulaExtractorAgent {
             .timeout_seconds(90)
             .build()
             .map_err(|e| AppError::other(format!("build formula llm: {e}")))?;
-        Ok(Self { llm, limiter, db, model })
+        Ok(Self {
+            llm,
+            limiter,
+            db,
+            model,
+        })
     }
 
     #[tracing::instrument(
@@ -99,10 +103,7 @@ impl FormulaExtractorAgent {
         skip(self, chunk_text),
         fields(agent.role = "formula_extractor", agent.tier = "light", bytes = chunk_text.len())
     )]
-    pub async fn extract(
-        &self,
-        chunk_text: &str,
-    ) -> AppResult<FormulaExtractOutput> {
+    pub async fn extract(&self, chunk_text: &str) -> AppResult<FormulaExtractOutput> {
         let _permit = self.limiter.admit(Role::FormulaExtractor).await?;
 
         // Hard cap the prompt — the light tier's context is tight and the
@@ -117,9 +118,7 @@ impl FormulaExtractorAgent {
             chunk_text
         };
 
-        let prompt = format!(
-            "{FORMULA_EXTRACTOR_SKILL}\n\n---\n\n# Chunk text\n\n{body}"
-        );
+        let prompt = format!("{FORMULA_EXTRACTOR_SKILL}\n\n---\n\n# Chunk text\n\n{body}");
 
         let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
@@ -146,15 +145,18 @@ impl FormulaExtractorAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )
         .await;
         let mut parsed: FormulaExtractOutput = serde_json::from_str(&text).map_err(|e| {
-            AppError::Schema(format!(
-                "parse formula: {e} :: {}",
-                truncate(&text, 400)
-            ))
+            AppError::Schema(format!("parse formula: {e} :: {}", truncate(&text, 400)))
         })?;
         let before = parsed.formulas.len();
         parsed.formulas.retain_mut(|f| {

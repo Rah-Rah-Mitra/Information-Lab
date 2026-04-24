@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use chrono::{NaiveDate, Utc};
+use sha2::{Digest, Sha256};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     ConnectOptions, SqlitePool,
@@ -23,11 +24,24 @@ pub struct PendingChunk {
 #[derive(Debug, Clone)]
 pub struct Db {
     pool: SqlitePool,
+    thinking_policy: ThinkingPolicy,
+    thinking_max_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ThinkingPolicy {
+    Retain,
+    Redact,
+    Discard,
 }
 
 impl Db {
     /// Open the pool, enable WAL, run migrations.
-    pub async fn open(path: &Path) -> AppResult<Self> {
+    pub async fn open(
+        path: &Path,
+        thinking_policy_raw: &str,
+        thinking_max_bytes: usize,
+    ) -> AppResult<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -48,7 +62,11 @@ impl Db {
             .await?;
 
         sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            thinking_policy: ThinkingPolicy::from_raw(thinking_policy_raw),
+            thinking_max_bytes,
+        })
     }
 
     /// Record a newly-seen document. Returns `true` if it was new.
@@ -138,12 +156,11 @@ impl Db {
     /// Return the distinct doc_hashes touched by a batch (so the caller
     /// can re-check document completion after `mark_batch_done`).
     pub async fn batch_doc_hashes(&self, batch_id: &str) -> AppResult<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?",
-        )
-        .bind(batch_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?")
+                .bind(batch_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows)
     }
 
@@ -224,10 +241,12 @@ impl Db {
     }
 
     pub async fn mark_batch_done(&self, batch_id: &str) -> AppResult<()> {
-        sqlx::query("UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?")
-            .bind(batch_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?",
+        )
+        .bind(batch_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -306,13 +325,11 @@ impl Db {
             tx.rollback().await?;
             return Ok(None);
         };
-        sqlx::query(
-            "UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?",
-        )
-        .bind(batch_id)
-        .bind(task.id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?")
+            .bind(batch_id)
+            .bind(task.id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(Some(task))
     }
@@ -340,10 +357,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn agent_task_pending_count(
-        &self,
-        kind: AgentTaskKind,
-    ) -> AppResult<i64> {
+    pub async fn agent_task_pending_count(&self, kind: AgentTaskKind) -> AppResult<i64> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM agent_tasks
              WHERE kind = ? AND state IN ('pending','running')",
@@ -397,12 +411,12 @@ impl Db {
     // -----------------------------------------------------------------------
 
     pub async fn topic_snapshot(&self, topic: &str) -> AppResult<Option<i64>> {
-        Ok(sqlx::query_scalar(
-            "SELECT entry_count FROM topic_snapshots WHERE topic = ?",
+        Ok(
+            sqlx::query_scalar("SELECT entry_count FROM topic_snapshots WHERE topic = ?")
+                .bind(topic)
+                .fetch_optional(&self.pool)
+                .await?,
         )
-        .bind(topic)
-        .fetch_optional(&self.pool)
-        .await?)
     }
 
     pub async fn upsert_topic_snapshot(
@@ -533,13 +547,13 @@ impl Db {
 
     pub async fn search_usage_this_month(&self) -> AppResult<i64> {
         let month = Utc::now().format("%Y-%m").to_string();
-        Ok(sqlx::query_scalar(
-            "SELECT calls FROM search_usage WHERE month = ?",
+        Ok(
+            sqlx::query_scalar("SELECT calls FROM search_usage WHERE month = ?")
+                .bind(&month)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or(0),
         )
-        .bind(&month)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(0))
     }
 
     pub async fn increment_search_usage(&self) -> AppResult<()> {
@@ -618,10 +632,9 @@ impl Db {
     }
 
     pub async fn pending_count(&self) -> AppResult<i64> {
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
-                .fetch_one(&self.pool)
-                .await?;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(n)
     }
 
@@ -702,13 +715,24 @@ impl Db {
         tokens_sent: i64,
         tokens_received: i64,
         duration_ms: Option<i64>,
+        research_request_id: Option<&str>,
+        step_index: Option<i64>,
+        phase: Option<&str>,
+        tool_name: Option<&str>,
+        model_name: Option<&str>,
+        artifact_path: Option<&str>,
     ) -> AppResult<()> {
+        let thinking = self.sanitize_thinking(thinking);
+        let prompt_hash = input_summary.map(sha256_hex);
+        let response_hash = output_summary.map(sha256_hex);
         sqlx::query(
             "INSERT INTO agent_events
              (trace_id, span_id, parent_span_id, agent_role, event_kind,
               input_summary, output_summary, thinking, payload_json,
-              tokens_sent, tokens_received, duration_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              tokens_sent, tokens_received, duration_ms, research_request_id,
+              step_index, phase, tool_name, model_name, prompt_hash,
+              response_hash, artifact_path)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(trace_id)
         .bind(span_id)
@@ -722,19 +746,26 @@ impl Db {
         .bind(tokens_sent)
         .bind(tokens_received)
         .bind(duration_ms)
+        .bind(research_request_id)
+        .bind(step_index)
+        .bind(phase)
+        .bind(tool_name)
+        .bind(model_name)
+        .bind(prompt_hash)
+        .bind(response_hash)
+        .bind(artifact_path)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn list_recent_agent_events(
-        &self,
-        limit: i64,
-    ) -> AppResult<Vec<AgentEventRow>> {
+    pub async fn list_recent_agent_events(&self, limit: i64) -> AppResult<Vec<AgentEventRow>> {
         Ok(sqlx::query_as(
             "SELECT id, ts, trace_id, span_id, parent_span_id, agent_role,
                     event_kind, input_summary, output_summary, thinking,
-                    payload_json, tokens_sent, tokens_received, duration_ms
+                    payload_json, tokens_sent, tokens_received, duration_ms,
+                    research_request_id, step_index, phase, tool_name,
+                    model_name, prompt_hash, response_hash, artifact_path
              FROM agent_events
              ORDER BY id DESC
              LIMIT ?",
@@ -743,6 +774,82 @@ impl Db {
         .fetch_all(&self.pool)
         .await?)
     }
+
+    pub async fn list_research_events(
+        &self,
+        research_request_id: &str,
+    ) -> AppResult<Vec<AgentEventRow>> {
+        Ok(sqlx::query_as(
+            "SELECT id, ts, trace_id, span_id, parent_span_id, agent_role,
+                    event_kind, input_summary, output_summary, thinking,
+                    payload_json, tokens_sent, tokens_received, duration_ms,
+                    research_request_id, step_index, phase, tool_name,
+                    model_name, prompt_hash, response_hash, artifact_path
+             FROM agent_events
+             WHERE research_request_id = ?
+             ORDER BY id ASC",
+        )
+        .bind(research_request_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn get_research_summary(
+        &self,
+        research_request_id: &str,
+    ) -> AppResult<Option<ResearchSummary>> {
+        Ok(sqlx::query_as(
+            "SELECT
+                research_request_id,
+                MIN(ts) AS first_ts,
+                MAX(ts) AS last_ts,
+                MAX(CASE WHEN event_kind='finalized' THEN 1 ELSE 0 END) AS finalized,
+                MAX(CASE WHEN event_kind='failed' THEN 1 ELSE 0 END) AS failed,
+                COUNT(*) AS event_count
+             FROM agent_events
+             WHERE research_request_id = ?
+             GROUP BY research_request_id",
+        )
+        .bind(research_request_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    fn sanitize_thinking(&self, thinking: Option<&str>) -> Option<String> {
+        let thinking = thinking?;
+        match self.thinking_policy {
+            ThinkingPolicy::Discard => None,
+            ThinkingPolicy::Redact => Some("[redacted]".to_string()),
+            ThinkingPolicy::Retain => Some(truncate_bytes(thinking, self.thinking_max_bytes)),
+        }
+    }
+}
+
+impl ThinkingPolicy {
+    fn from_raw(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "retain" => Self::Retain,
+            "discard" => Self::Discard,
+            _ => Self::Redact,
+        }
+    }
+}
+
+fn truncate_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s[..cut].to_string()
+}
+
+fn sha256_hex(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -813,7 +920,7 @@ impl UsageRow {
     }
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 #[allow(dead_code)]
 pub struct AgentEventRow {
     pub id: i64,
@@ -830,6 +937,24 @@ pub struct AgentEventRow {
     pub tokens_sent: i64,
     pub tokens_received: i64,
     pub duration_ms: Option<i64>,
+    pub research_request_id: Option<String>,
+    pub step_index: Option<i64>,
+    pub phase: Option<String>,
+    pub tool_name: Option<String>,
+    pub model_name: Option<String>,
+    pub prompt_hash: Option<String>,
+    pub response_hash: Option<String>,
+    pub artifact_path: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct ResearchSummary {
+    pub research_request_id: String,
+    pub first_ts: String,
+    pub last_ts: String,
+    pub finalized: i64,
+    pub failed: i64,
+    pub event_count: i64,
 }
 
 // Surface an explicit conversion target for tests/bin crates.
@@ -848,7 +973,6 @@ pub enum AgentTaskKind {
     Derivation,
     Report,
     FormulaExtract,
-    Research,
 }
 
 impl AgentTaskKind {
@@ -861,7 +985,6 @@ impl AgentTaskKind {
             AgentTaskKind::Derivation => "Derivation",
             AgentTaskKind::Report => "Report",
             AgentTaskKind::FormulaExtract => "FormulaExtract",
-            AgentTaskKind::Research => "Research",
         }
     }
 }

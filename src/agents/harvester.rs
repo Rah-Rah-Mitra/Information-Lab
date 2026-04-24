@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 use crate::{
     db::Db,
     error::{AppError, AppResult},
+    formula_norm::normalize_latex_for_dedupe,
 };
 
 use super::curator::Formula;
@@ -90,7 +91,7 @@ impl FormulaHarvesterAgent {
             };
             let rel = rel_path(&self.vault_dir, &path);
             for f in self.extract_formulas(&content, &rel) {
-                let norm = normalise(&f.latex, &self.symbol);
+                let norm = normalize_latex_for_dedupe(&f.latex);
                 let symbols_csv = f.symbols.join(",");
                 let inserted = self
                     .db
@@ -156,16 +157,6 @@ fn surrounding_line(content: &str, at: usize) -> String {
     } else {
         line.to_string()
     }
-}
-
-fn normalise(latex: &str, symbol_re: &Regex) -> String {
-    let mut syms: Vec<String> = symbol_re
-        .find_iter(latex)
-        .map(|m| m.as_str().to_string())
-        .collect();
-    syms.sort();
-    syms.dedup();
-    syms.join("|")
 }
 
 fn rel_path(root: &Path, p: &Path) -> String {

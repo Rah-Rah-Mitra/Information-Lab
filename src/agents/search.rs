@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     config::Config,
@@ -82,6 +82,8 @@ pub struct LiteratureSearchAgent {
     http: reqwest::Client,
     api_key: Option<String>,
     monthly_limit: u32,
+    daily_soft_cap: u32,
+    per_bridge_cap: u32,
     domains: Vec<String>,
     max_results: u8,
     db: Db,
@@ -97,14 +99,16 @@ impl LiteratureSearchAgent {
             http,
             api_key: cfg.tavily_api_key.clone(),
             monthly_limit: cfg.tavily_monthly_limit,
+            daily_soft_cap: cfg.tavily_daily_soft_cap,
+            per_bridge_cap: cfg.tavily_per_bridge_cap,
             domains: cfg.tavily_domains.clone(),
             max_results: cfg.tavily_max_results,
             db,
         })
     }
 
-    #[tracing::instrument(level = "info", skip(self), fields(q = %query))]
-    pub async fn search(&self, query: &str) -> AppResult<SearchResult> {
+    #[tracing::instrument(level = "info", skip(self), fields(q = %query, bridge_calls_used))]
+    pub async fn search(&self, query: &str, bridge_calls_used: u32) -> AppResult<SearchResult> {
         let Some(ref key) = self.api_key else {
             debug!("tavily disabled (no api key)");
             return Ok(SearchResult {
@@ -114,9 +118,21 @@ impl LiteratureSearchAgent {
             });
         };
 
-        let used = self.db.search_usage_this_month().await? as u32;
-        if used >= self.monthly_limit {
-            warn!(used, cap = self.monthly_limit, "tavily monthly cap reached");
+        let month_used = self.db.search_usage_this_month().await? as u32;
+        let over_monthly = month_used >= self.monthly_limit;
+        let over_daily = month_used >= self.daily_soft_cap;
+        let over_bridge = bridge_calls_used >= self.per_bridge_cap;
+        if over_monthly || over_daily || over_bridge {
+            warn!(
+                budget_reserved = false,
+                budget_denied = true,
+                month_used,
+                limit = self.monthly_limit,
+                bridge_calls_used,
+                daily_soft_cap = self.daily_soft_cap,
+                per_bridge_cap = self.per_bridge_cap,
+                "tavily budget reservation denied"
+            );
             return Ok(SearchResult {
                 query: query.into(),
                 hits: vec![],
@@ -138,17 +154,34 @@ impl LiteratureSearchAgent {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::other(format!("tavily post: {e}")))?;
+            .map_err(|e| {
+                error!(
+                    budget_reserved = true,
+                    budget_denied = false,
+                    month_used,
+                    limit = self.monthly_limit,
+                    "tavily post failed after reservation (strict quota policy: keep spent)"
+                );
+                AppError::other(format!("tavily post: {e}"))
+            })?;
         if !resp.status().is_success() {
             let s = resp.status();
             let t = resp.text().await.unwrap_or_default();
+            error!(
+                budget_reserved = true,
+                budget_denied = false,
+                month_used,
+                limit = self.monthly_limit,
+                status = %s,
+                "tavily HTTP error after reservation (strict quota policy: keep spent)"
+            );
             return Err(AppError::other(format!("tavily {s}: {t}")));
         }
+        self.db.increment_search_usage().await?;
         let parsed: TavilyResponse = resp
             .json()
             .await
             .map_err(|e| AppError::other(format!("tavily json: {e}")))?;
-        self.db.increment_search_usage().await?;
 
         let hits = parsed
             .results
@@ -164,7 +197,14 @@ impl LiteratureSearchAgent {
                 }
             })
             .collect::<Vec<_>>();
-        debug!(hits = hits.len(), "tavily ok");
+        debug!(
+            hits = hits.len(),
+            budget_reserved = true,
+            budget_denied = false,
+            month_used,
+            limit = self.monthly_limit,
+            "tavily ok"
+        );
         Ok(SearchResult {
             query: query.into(),
             hits,

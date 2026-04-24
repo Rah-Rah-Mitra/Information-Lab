@@ -54,7 +54,7 @@ async fn write_status(db: &Db, vault_dir: &PathBuf) -> AppResult<()> {
     writeln!(body, "| Theorem calls | {} |", usage.theorem_calls).ok();
     writeln!(body, "| Derivation calls | {} |", usage.derivation_calls).ok();
     writeln!(body, "| Report calls | {} |", usage.report_calls).ok();
-    writeln!(body, "| Formula-extract calls | {} |", usage.formula_extract_calls).ok();
+    writeln!(body, "| Formula extractor calls | {} |", usage.formula_extract_calls).ok();
     writeln!(body, "| Tokens sent (est.) | {} |", usage.tokens_sent).ok();
     writeln!(body, "| Tokens received (est.) | {} |", usage.tokens_received).ok();
     writeln!(body).ok();

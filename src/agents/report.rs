@@ -93,7 +93,12 @@ impl ReportWriterAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build report llm: {e}")))?;
-        Ok(Self { llm, limiter, db, model })
+        Ok(Self {
+            llm,
+            limiter,
+            db,
+            model,
+        })
     }
 
     #[tracing::instrument(
@@ -101,11 +106,7 @@ impl ReportWriterAgent {
         skip(self, inputs),
         fields(agent.role = "report", agent.tier = "heavy", date = %date, items = inputs.len())
     )]
-    pub async fn write(
-        &self,
-        date: &str,
-        inputs: &[ReportInput],
-    ) -> AppResult<DailyReport> {
+    pub async fn write(&self, date: &str, inputs: &[ReportInput]) -> AppResult<DailyReport> {
         let _permit = self.limiter.admit(Role::Report).await?;
 
         let inputs_block = inputs
@@ -153,6 +154,12 @@ impl ReportWriterAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )
