@@ -973,6 +973,7 @@ pub enum AgentTaskKind {
     Derivation,
     Report,
     FormulaExtract,
+    Research,
 }
 
 impl AgentTaskKind {
@@ -985,6 +986,7 @@ impl AgentTaskKind {
             AgentTaskKind::Derivation => "Derivation",
             AgentTaskKind::Report => "Report",
             AgentTaskKind::FormulaExtract => "FormulaExtract",
+            AgentTaskKind::Research => "Research",
         }
     }
 }

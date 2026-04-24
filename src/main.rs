@@ -11,8 +11,9 @@ use edge_kg_agent::{
     agents::{
         bridge::BridgeFinderAgent, curator::TopicCuratorAgent, derivation::DerivationChainAgent,
         formula_extractor::FormulaExtractorAgent, harvester::FormulaHarvesterAgent,
-        report::ReportWriterAgent, retrier::ErrorRetrierAgent, search::LiteratureSearchAgent,
-        theorem::TheoremProverAgent, KnowledgeGraphAgent,
+        report::ReportWriterAgent, research_request::ResearchRequestAgent,
+        retrier::ErrorRetrierAgent, search::LiteratureSearchAgent, theorem::TheoremProverAgent,
+        KnowledgeGraphAgent,
     },
     api,
     config::Config,
@@ -91,6 +92,7 @@ async fn run() -> AppResult<()> {
     let derivation_agent = DerivationChainAgent::new(&cfg, limiter.clone(), db.clone())?;
     let report_agent = ReportWriterAgent::new(&cfg, limiter.clone(), db.clone())?;
     let formula_agent = FormulaExtractorAgent::new(&cfg, limiter.clone(), db.clone())?;
+    let research_request_agent = ResearchRequestAgent::new(&cfg, limiter.clone(), db.clone())?;
     let scheduler = Scheduler::new(cfg.clone(), db.clone())?;
 
     let orch = Orchestrator::new(cfg.clone(), db.clone(), kg, vault);
@@ -108,6 +110,7 @@ async fn run() -> AppResult<()> {
     orch.spawn_error_retrier(retrier_agent);
     orch.spawn_heavy_research(theorem_agent, derivation_agent, report_agent);
     orch.spawn_formula_extractor(formula_agent);
+    orch.spawn_research_requests(research_request_agent);
     orch.spawn_idle_scheduler(scheduler);
 
     shutdown_signal().await;
