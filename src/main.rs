@@ -22,7 +22,7 @@ use edge_kg_agent::{
     limiter::Limiter,
     orchestrator::Orchestrator,
     scheduler::Scheduler,
-    status, telemetry,
+    status, telegram, telemetry,
     vault::VaultWriter,
     watcher,
 };
@@ -100,6 +100,7 @@ async fn run() -> AppResult<()> {
     // Status heartbeat.
     status::spawn(db.clone(), cfg.vault_dir.clone(), cfg.status_interval);
     api::spawn(db.clone(), cfg.research_api_bind.clone());
+    telegram::spawn(&cfg, db.clone());
 
     // Filesystem watcher → orchestrator ingest consumer.
     let rx = watcher::spawn(cfg.watch_dir.clone(), cfg.fs_debounce)?;

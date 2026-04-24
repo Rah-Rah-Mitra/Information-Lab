@@ -110,6 +110,15 @@ pub struct Config {
 
     /// HTTP bind address for research timeline query API.
     pub research_api_bind: String,
+    /// Full endpoint URL used by local clients (e.g. Telegram bot) to queue
+    /// ad-hoc research requests.
+    pub research_request_endpoint: String,
+
+    // ---- Telegram bot control plane ----
+    /// Telegram bot token from BotFather. Empty disables the bot entirely.
+    pub telegram_bot_token: Option<String>,
+    /// Base API URL for Telegram Bot API requests.
+    pub telegram_api_base: String,
 
     /// Policy for storing optional model reasoning text (`thinking`).
     ///
@@ -229,6 +238,14 @@ impl Config {
             scheduler_interval: Duration::from_secs(env_parse("SCHEDULER_INTERVAL_SECS", 60_u64)?),
             research_interval: Duration::from_secs(env_parse("RESEARCH_INTERVAL_SECS", 30_u64)?),
             research_api_bind: env_or("RESEARCH_API_BIND", "127.0.0.1:8090"),
+            research_request_endpoint: env_or(
+                "RESEARCH_REQUEST_ENDPOINT",
+                "http://127.0.0.1:8090/research/request",
+            ),
+            telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            telegram_api_base: env_or("TELEGRAM_API_BASE", "https://api.telegram.org"),
             thinking_redaction_policy: env_or("THINKING_REDACTION_POLICY", "redact"),
             thinking_max_bytes: env_parse("THINKING_MAX_BYTES", 2048_usize)?,
 

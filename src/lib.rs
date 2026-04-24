@@ -14,6 +14,7 @@ pub mod limiter;
 pub mod orchestrator;
 pub mod scheduler;
 pub mod status;
+pub mod telegram;
 pub mod telemetry;
 pub mod vault;
 pub mod watcher;
