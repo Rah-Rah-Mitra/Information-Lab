@@ -18,6 +18,7 @@
 - `pending` work drains over time.
 - Output appears under `Generated/` and index files update.
 - Telemetry spans/events are emitted when tracing is configured.
+- Research API accepts queue requests and exposes request timelines.
 
 ## Incident patterns
 
@@ -32,6 +33,8 @@
 - Confirm scheduler interval settings.
 - Confirm task creation preconditions are met.
 - Inspect confidence thresholds that gate output emission.
+- For ad-hoc requests, inspect `/research/{id}/events` for `solvability_checked` and
+  terminal `finalized`/`failed` phases.
 
 ### Corrupt or partial vault output
 
@@ -46,3 +49,10 @@ For migrations or workflow changes:
 - Apply SQL migrations before deploying runtime expecting new columns/tables.
 - Roll forward with small batches and monitor logs/telemetry.
 - Keep docs synchronized in the same change set.
+
+## CI/CD checkpoints
+
+- Pull requests and `main` pushes must pass build + full-target tests in
+  `.github/workflows/ci-cd.yml`.
+- Release tags (`v*`) trigger binary packaging and release attachment; verify the
+  `edge-kg-agent` artifact is present before announcing a release.

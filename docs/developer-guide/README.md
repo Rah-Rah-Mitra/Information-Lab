@@ -7,11 +7,13 @@ This guide covers system internals, extension points, and expected engineering p
 ## 2) Codebase map
 
 - `src/orchestrator.rs`: task spawning and runtime coordination.
+- `src/api.rs`: lightweight HTTP API for research request enqueue + timeline reads.
 - `src/workflow.rs`: Sequential / Parallel / Loop workflow primitives.
 - `src/agents/*.rs`: role-specific agent implementations.
 - `src/db.rs` + `migrations/*.sql`: persistence and task state.
 - `src/vault.rs`: markdown and index writing.
 - `skills/*.md`: model behavior specs/prompts.
+- `.github/workflows/ci-cd.yml`: CI build/test and tag-gated release artifact pipeline.
 
 ## 3) Runtime responsibilities
 
@@ -41,6 +43,7 @@ flowchart LR
 - **TheoremProver**: formal-style proof notes based on confident bridges.
 - **DerivationChain**: equation progression notes.
 - **ReportWriter**: daily narrative synthesis.
+- **ResearchRequest**: ad-hoc problem-solving lane with solvability gate and bounded iterations.
 
 ### Tooling/system agents
 
@@ -61,6 +64,21 @@ flowchart LR
 - Prefer bounded loops and explicit thresholds.
 - Preserve idempotency for re-runs/retries.
 - Add tracing span boundaries for new control-flow stages.
+
+## 7) CI/CD workflow
+
+GitHub Actions now enforces the default integration and release path:
+
+- On `push` to `main` and on every `pull_request`, run:
+  - `cargo build --verbose`
+  - `cargo test --all-targets`
+- On tags matching `v*` (after CI passes), run release job:
+  - `cargo build --release`
+  - upload `dist/edge-kg-agent` as an artifact
+  - attach the binary to the corresponding GitHub release
+
+When changing runtime behavior, keep docs and tests in the same PR so CI validates
+implementation + documentation drift together.
 
 See also:
 

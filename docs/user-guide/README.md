@@ -68,3 +68,25 @@ flowchart LR
 - Upload smaller batches for faster first-pass results.
 - Keep source filenames descriptive.
 - Review `_Reports` daily for synthesized progress.
+
+## 8) Request ad-hoc research via API
+
+If the API server is enabled, you can queue a direct research task:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8787/research/request \
+  -H 'content-type: application/json' \
+  -d '{
+    "problem": "Derive the Euler-Lagrange equation for a constrained system",
+    "max_iterations": 3,
+    "skills_scope": ["derivation_chain", "theorem_prover"]
+  }'
+```
+
+Then inspect lifecycle progress:
+
+- `GET /research/{id}` for summary + events
+- `GET /research/{id}/events` for detailed event stream
+
+If local knowledge coverage is too low, the system finalizes with an
+`UNSOLVABLE_INSUFFICIENT_KNOWLEDGE` artifact that explains what information is missing.
