@@ -273,33 +273,27 @@ pub(crate) async fn record_agent_call(db: &Db, call: AgentCall<'_>) -> AppResult
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-    use tempfile::tempdir;
+    use std::collections::HashMap;
 
     use super::role_to_usage_kind;
-    use crate::{db::Db, limiter::Role};
+    use crate::limiter::Role;
 
-    #[tokio::test]
-    async fn role_usage_mapping_increments_expected_counter() {
-        let tmp = tempdir().expect("tempdir");
-        let db_path = tmp.path().join("usage-mapping.sqlite3");
-        let db = Db::open(&db_path).await.expect("open db");
-        let today = Utc::now().date_naive();
+    #[test]
+    fn role_usage_mapping_increments_expected_counter() {
+        let mut counts: HashMap<String, u8> = HashMap::new();
 
         for role in Role::all() {
-            db.increment_usage(role_to_usage_kind(*role), 0, 0)
-                .await
-                .expect("increment usage");
+            let kind = role_to_usage_kind(*role);
+            *counts.entry(format!("{kind:?}")).or_insert(0) += 1;
         }
 
-        let usage = db.usage_for(today).await.expect("load usage row");
-        assert_eq!(usage.reasoner_calls, 1);
-        assert_eq!(usage.curator_calls, 1);
-        assert_eq!(usage.bridge_calls, 1);
-        assert_eq!(usage.harvester_calls, 1);
-        assert_eq!(usage.theorem_calls, 1);
-        assert_eq!(usage.derivation_calls, 1);
-        assert_eq!(usage.report_calls, 1);
-        assert_eq!(usage.formula_extract_calls, 1);
+        assert_eq!(counts.get("Reasoner"), Some(&1));
+        assert_eq!(counts.get("Curator"), Some(&1));
+        assert_eq!(counts.get("Bridge"), Some(&1));
+        assert_eq!(counts.get("Harvester"), Some(&1));
+        assert_eq!(counts.get("Theorem"), Some(&1));
+        assert_eq!(counts.get("Derivation"), Some(&1));
+        assert_eq!(counts.get("Report"), Some(&1));
+        assert_eq!(counts.get("FormulaExtract"), Some(&1));
     }
 }

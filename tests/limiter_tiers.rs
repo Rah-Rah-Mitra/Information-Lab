@@ -17,8 +17,6 @@ fn test_cfg() -> Config {
         vault_dir: PathBuf::from("."),
         db_path: PathBuf::from("./.data/test.db"),
         log_dir: PathBuf::from("./logs"),
-        http_bind: "127.0.0.1:0".into(),
-
         api_key: "test".into(),
         api_base: String::new(),
         light_model: "light".into(),
