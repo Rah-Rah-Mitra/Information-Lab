@@ -814,7 +814,7 @@ async fn drain_formula_extract(
                 }
             }
             let _ = db
-                .increment_usage(UsageKind::Harvester, 0, 0)
+                .increment_usage(UsageKind::FormulaExtract, 0, 0)
                 .await;
             info!(
                 chunk_id,
