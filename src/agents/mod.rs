@@ -29,6 +29,7 @@ pub mod extractor;
 pub mod formula_extractor;
 pub mod harvester;
 pub mod report;
+pub mod research;
 pub mod retrier;
 pub mod search;
 pub mod theorem;

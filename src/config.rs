@@ -149,6 +149,8 @@ pub struct Config {
     pub tavily_domains: Vec<String>,
     /// Results requested per Tavily call.
     pub tavily_max_results: u8,
+    /// Bind address for the lightweight research API endpoint.
+    pub research_api_bind: String,
 }
 
 impl Config {
@@ -262,6 +264,7 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect(),
             tavily_max_results: env_parse("TAVILY_MAX_RESULTS", 5_u8)?,
+            research_api_bind: env_or("RESEARCH_API_BIND", "127.0.0.1:8787"),
         })
     }
 

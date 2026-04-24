@@ -43,6 +43,7 @@ use crate::agents::bridge::BridgeNote;
 use crate::agents::curator::{Formula, TopicSynthesis};
 use crate::agents::derivation::DerivationChainNote;
 use crate::agents::report::DailyReport;
+use crate::agents::research::ResearchResult;
 use crate::agents::theorem::TheoremNote;
 use crate::agents::KgOutput;
 use crate::error::{AppError, AppResult};
@@ -496,6 +497,65 @@ impl VaultWriter {
             warn!(error = %e, "root Reports registration failed");
         }
         info!(path = %abs.display(), "report written");
+        Ok(abs)
+    }
+
+    /// Write an ad-hoc research response under `Generated/_Research/`.
+    #[instrument(level = "info", skip(self, out), fields(title = %out.title))]
+    pub async fn write_research(&self, out: &ResearchResult) -> AppResult<PathBuf> {
+        let dir = self.vault_dir.join("Generated").join("_Research");
+        fs::create_dir_all(&dir).await?;
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let filename = format!("{}-{ts}.md", slugify(&out.title));
+        let rel = format!("Generated/_Research/{filename}");
+        let abs = dir.join(&filename);
+
+        let mut fm = String::new();
+        fm.push_str("---\n");
+        fm.push_str("type: research\n");
+        fm.push_str(&format!("title: {}\n", yaml_scalar(&out.title)));
+        fm.push_str(&format!("created: {}\n", Utc::now().to_rfc3339()));
+        fm.push_str("---");
+
+        let refs = if out.references.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\n## References\n");
+            for r in &out.references {
+                s.push_str(&format!("- {r}\n"));
+            }
+            s
+        };
+        let oq = if out.open_questions.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("\n## Open Questions\n");
+            for q in &out.open_questions {
+                s.push_str(&format!("- {q}\n"));
+            }
+            s
+        };
+
+        let body = format!(
+            "{fm}\n\n# {}\n\n*{}*\n\n{}\n{}{}\n",
+            out.title, out.summary, out.markdown_body, refs, oq
+        );
+        let mut f = fs::File::create(&abs).await?;
+        f.write_all(body.as_bytes()).await?;
+        f.sync_all().await?;
+
+        let _guard = self.index_lock.lock().await;
+        if let Err(e) = register_root_link(
+            &self.vault_dir,
+            RootSection::Reports,
+            &rel,
+            &format!("Research: {}", out.title),
+        )
+        .await
+        {
+            warn!(error = %e, "root research registration failed");
+        }
+        info!(path = %abs.display(), "research written");
         Ok(abs)
     }
 }
