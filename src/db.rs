@@ -732,7 +732,7 @@ impl Db {
               tokens_sent, tokens_received, duration_ms, research_request_id,
               step_index, phase, tool_name, model_name, prompt_hash,
               response_hash, artifact_path)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(trace_id)
         .bind(span_id)
