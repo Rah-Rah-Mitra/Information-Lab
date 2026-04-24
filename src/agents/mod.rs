@@ -29,13 +29,14 @@ pub mod extractor;
 pub mod formula_extractor;
 pub mod harvester;
 pub mod report;
+pub mod research_request;
 pub mod retrier;
 pub mod search;
 pub mod theorem;
 
-pub use extractor::{KgOutput, KnowledgeGraphAgent};
 #[allow(unused_imports)]
 pub use extractor::Relationship;
+pub use extractor::{KgOutput, KnowledgeGraphAgent};
 
 // ----------------------------------------------------------------------------
 // Skill prompts — compiled into the binary; see `skills/*.md`.

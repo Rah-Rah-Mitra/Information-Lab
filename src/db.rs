@@ -138,12 +138,11 @@ impl Db {
     /// Return the distinct doc_hashes touched by a batch (so the caller
     /// can re-check document completion after `mark_batch_done`).
     pub async fn batch_doc_hashes(&self, batch_id: &str) -> AppResult<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?",
-        )
-        .bind(batch_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?")
+                .bind(batch_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows)
     }
 
@@ -224,10 +223,12 @@ impl Db {
     }
 
     pub async fn mark_batch_done(&self, batch_id: &str) -> AppResult<()> {
-        sqlx::query("UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?")
-            .bind(batch_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?",
+        )
+        .bind(batch_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -306,15 +307,25 @@ impl Db {
             tx.rollback().await?;
             return Ok(None);
         };
-        sqlx::query(
-            "UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?",
-        )
-        .bind(batch_id)
-        .bind(task.id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?")
+            .bind(batch_id)
+            .bind(task.id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(Some(task))
+    }
+
+    pub async fn get_agent_task(&self, id: i64) -> AppResult<Option<AgentTaskRow>> {
+        Ok(sqlx::query_as(
+            "SELECT id, kind, payload, state, batch_id, last_error,
+                    created_at, completed_at
+             FROM agent_tasks
+             WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub async fn finish_agent_task(&self, id: i64) -> AppResult<()> {
@@ -340,10 +351,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn agent_task_pending_count(
-        &self,
-        kind: AgentTaskKind,
-    ) -> AppResult<i64> {
+    pub async fn agent_task_pending_count(&self, kind: AgentTaskKind) -> AppResult<i64> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM agent_tasks
              WHERE kind = ? AND state IN ('pending','running')",
@@ -397,12 +405,12 @@ impl Db {
     // -----------------------------------------------------------------------
 
     pub async fn topic_snapshot(&self, topic: &str) -> AppResult<Option<i64>> {
-        Ok(sqlx::query_scalar(
-            "SELECT entry_count FROM topic_snapshots WHERE topic = ?",
+        Ok(
+            sqlx::query_scalar("SELECT entry_count FROM topic_snapshots WHERE topic = ?")
+                .bind(topic)
+                .fetch_optional(&self.pool)
+                .await?,
         )
-        .bind(topic)
-        .fetch_optional(&self.pool)
-        .await?)
     }
 
     pub async fn upsert_topic_snapshot(
@@ -533,13 +541,13 @@ impl Db {
 
     pub async fn search_usage_this_month(&self) -> AppResult<i64> {
         let month = Utc::now().format("%Y-%m").to_string();
-        Ok(sqlx::query_scalar(
-            "SELECT calls FROM search_usage WHERE month = ?",
+        Ok(
+            sqlx::query_scalar("SELECT calls FROM search_usage WHERE month = ?")
+                .bind(&month)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or(0),
         )
-        .bind(&month)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(0))
     }
 
     pub async fn increment_search_usage(&self) -> AppResult<()> {
@@ -618,10 +626,9 @@ impl Db {
     }
 
     pub async fn pending_count(&self) -> AppResult<i64> {
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
-                .fetch_one(&self.pool)
-                .await?;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(n)
     }
 
@@ -727,10 +734,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_recent_agent_events(
-        &self,
-        limit: i64,
-    ) -> AppResult<Vec<AgentEventRow>> {
+    pub async fn list_recent_agent_events(&self, limit: i64) -> AppResult<Vec<AgentEventRow>> {
         Ok(sqlx::query_as(
             "SELECT id, ts, trace_id, span_id, parent_span_id, agent_role,
                     event_kind, input_summary, output_summary, thinking,
@@ -848,6 +852,7 @@ pub enum AgentTaskKind {
     Derivation,
     Report,
     FormulaExtract,
+    ResearchRequest,
 }
 
 impl AgentTaskKind {
@@ -860,6 +865,7 @@ impl AgentTaskKind {
             AgentTaskKind::Derivation => "Derivation",
             AgentTaskKind::Report => "Report",
             AgentTaskKind::FormulaExtract => "FormulaExtract",
+            AgentTaskKind::ResearchRequest => "ResearchRequest",
         }
     }
 }

@@ -17,6 +17,8 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Directory for rotating log files.
     pub log_dir: PathBuf,
+    /// Bind address for the HTTP API server.
+    pub http_bind: String,
 
     /// Google AI Studio API key.
     pub api_key: String,
@@ -161,6 +163,7 @@ impl Config {
             vault_dir: env_path_or("VAULT_DIR", "./public"),
             db_path: env_path_or("DB_PATH", "./.data/state.db"),
             log_dir: env_path_or("LOG_DIR", "./logs"),
+            http_bind: env_or("HTTP_BIND", "127.0.0.1:8080"),
 
             api_key: env_required("GOOGLE_API_KEY")?,
             api_base: env_or(
@@ -218,14 +221,8 @@ impl Config {
             bridge_max_jaccard: env_parse("BRIDGE_MAX_JACCARD", 0.6_f32)?,
 
             harvest_every_n: env_parse("HARVEST_EVERY_N", 25_usize)?,
-            scheduler_interval: Duration::from_secs(env_parse(
-                "SCHEDULER_INTERVAL_SECS",
-                60_u64,
-            )?),
-            research_interval: Duration::from_secs(env_parse(
-                "RESEARCH_INTERVAL_SECS",
-                30_u64,
-            )?),
+            scheduler_interval: Duration::from_secs(env_parse("SCHEDULER_INTERVAL_SECS", 60_u64)?),
+            research_interval: Duration::from_secs(env_parse("RESEARCH_INTERVAL_SECS", 30_u64)?),
 
             curator_model: env_or("CURATOR_MODEL", ""),
             bridge_model: env_or("BRIDGE_MODEL", ""),

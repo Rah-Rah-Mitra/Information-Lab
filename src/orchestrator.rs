@@ -17,6 +17,7 @@ use crate::{
         formula_extractor::FormulaExtractorAgent,
         harvester::FormulaHarvesterAgent,
         report::{ReportInput, ReportWriterAgent},
+        research_request::{ResearchContext, ResearchRequestAgent},
         retrier::ErrorRetrierAgent,
         theorem::{TheoremInput, TheoremProverAgent},
         KnowledgeGraphAgent,
@@ -36,12 +37,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new(
-        cfg: Config,
-        db: Db,
-        kg: KnowledgeGraphAgent,
-        vault: VaultWriter,
-    ) -> Self {
+    pub fn new(cfg: Config, db: Db, kg: KnowledgeGraphAgent, vault: VaultWriter) -> Self {
         Self {
             cfg,
             db,
@@ -60,7 +56,10 @@ impl Orchestrator {
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
                 let span = tracing::info_span!("ingest", path = %path.display());
-                match ingest_pdf(&db, &watch_dir, &path, tau).instrument(span).await {
+                match ingest_pdf(&db, &watch_dir, &path, tau)
+                    .instrument(span)
+                    .await
+                {
                     Ok(IngestOutcome::Ingested { hash, chunks }) => {
                         info!(%hash, chunks, "ingested");
                     }
@@ -142,19 +141,16 @@ impl Orchestrator {
 
                             if let Err(e) = vault.write_note(&source_name, &out).await {
                                 error!(error = %e, "vault write failed");
-                                let _ = db
-                                    .mark_batch_error(&batch_id, &format!("vault: {e}"))
-                                    .await;
+                                let _ =
+                                    db.mark_batch_error(&batch_id, &format!("vault: {e}")).await;
                                 continue;
                             }
 
                             // Capture doc_hashes touched by this batch BEFORE
                             // mark_batch_done flips state to 'done', so we can
                             // check per-document completion afterwards.
-                            let touched_docs = db
-                                .batch_doc_hashes(&batch_id)
-                                .await
-                                .unwrap_or_default();
+                            let touched_docs =
+                                db.batch_doc_hashes(&batch_id).await.unwrap_or_default();
 
                             if let Err(e) = db.mark_batch_done(&batch_id).await {
                                 error!(error = %e, "mark_batch_done failed");
@@ -189,11 +185,7 @@ impl Orchestrator {
 
     /// Research tick: every `cfg.research_interval`, drain up to one
     /// Curate and one Bridge task concurrently (Parallel workflow shape).
-    pub fn spawn_research(
-        &self,
-        curator: TopicCuratorAgent,
-        bridge: BridgeFinderAgent,
-    ) {
+    pub fn spawn_research(&self, curator: TopicCuratorAgent, bridge: BridgeFinderAgent) {
         let db = self.db.clone();
         let vault = self.vault.clone();
         let interval = self.cfg.research_interval;
@@ -230,9 +222,7 @@ impl Orchestrator {
                 ticker.tick().await;
                 // Drain any queued Harvest tasks (scheduler enqueues them).
                 let batch_id = Uuid::new_v4().to_string();
-                let claimed = db
-                    .claim_agent_task(AgentTaskKind::Harvest, &batch_id)
-                    .await;
+                let claimed = db.claim_agent_task(AgentTaskKind::Harvest, &batch_id).await;
                 match claimed {
                     Ok(Some(task)) => {
                         match harvester.harvest(64).await {
@@ -247,36 +237,26 @@ impl Orchestrator {
                                     Ok(rows) => {
                                         let formulas = rows
                                             .into_iter()
-                                            .map(|r| {
-                                                crate::agents::curator::Formula {
-                                                    latex: r.latex,
-                                                    symbols: r
-                                                        .symbols
-                                                        .unwrap_or_default()
-                                                        .split(',')
-                                                        .filter(|s| !s.is_empty())
-                                                        .map(|s| s.to_string())
-                                                        .collect(),
-                                                    context_caption: r
-                                                        .context
-                                                        .unwrap_or_default(),
-                                                    note_rel_path: r.note_rel_path,
-                                                    derived: false,
-                                                }
+                                            .map(|r| crate::agents::curator::Formula {
+                                                latex: r.latex,
+                                                symbols: r
+                                                    .symbols
+                                                    .unwrap_or_default()
+                                                    .split(',')
+                                                    .filter(|s| !s.is_empty())
+                                                    .map(|s| s.to_string())
+                                                    .collect(),
+                                                context_caption: r.context.unwrap_or_default(),
+                                                note_rel_path: r.note_rel_path,
+                                                derived: false,
                                             })
                                             .collect::<Vec<_>>();
-                                        if let Err(e) =
-                                            vault.write_formulas_index(&formulas).await
+                                        if let Err(e) = vault.write_formulas_index(&formulas).await
                                         {
                                             warn!(error = %e, "formulas index write failed");
                                         }
-                                        if let Err(e) = db
-                                            .increment_usage(
-                                                UsageKind::Harvester,
-                                                0,
-                                                0,
-                                            )
-                                            .await
+                                        if let Err(e) =
+                                            db.increment_usage(UsageKind::Harvester, 0, 0).await
                                         {
                                             warn!(error = %e, "usage increment failed");
                                         }
@@ -390,6 +370,25 @@ impl Orchestrator {
         });
     }
 
+    /// API ad-hoc research drain. Pulls `ResearchRequest` tasks and executes
+    /// an isolated loop that only uses vault/topic/formula context.
+    pub fn spawn_research_requests(&self, agent: ResearchRequestAgent) {
+        let db = self.db.clone();
+        let vault = self.vault.clone();
+        let interval = self.cfg.research_interval;
+        tokio::spawn(async move {
+            time::sleep(Duration::from_secs(8)).await;
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = drain_research_request(&db, &vault, &agent).await {
+                    warn!(error = %e, "research_request drain failed");
+                }
+            }
+        });
+    }
+
     /// Idle scheduler tick. Enqueues Curate / Bridge / Harvest tasks based
     /// on vault deltas and DB snapshots.
     pub fn spawn_idle_scheduler(&self, scheduler: Scheduler) {
@@ -418,11 +417,14 @@ async fn drain_curate(
     curator: &TopicCuratorAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Curate, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Curate, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
-    let payload: serde_json::Value = serde_json::from_str(&task.payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
     let topic = payload
         .get("topic")
         .and_then(|v| v.as_str())
@@ -488,11 +490,14 @@ async fn drain_bridge(
     tau: f32,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Bridge, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Bridge, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
-    let payload: serde_json::Value = serde_json::from_str(&task.payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
     let s = |k: &str| {
         payload
             .get(k)
@@ -558,7 +563,10 @@ async fn drain_theorem(
     theorem: &TheoremProverAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Theorem, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Theorem, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
     info!(
@@ -649,7 +657,11 @@ async fn drain_derivation(
     let notes: Vec<String> = payload
         .get("notes")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if seed_topic.is_empty() || notes.is_empty() {
         db.fail_agent_task(task.id, "derivation: missing payload fields")
@@ -703,7 +715,10 @@ async fn drain_report(
     report: &ReportWriterAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Report, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Report, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
     info!(
@@ -767,7 +782,10 @@ async fn drain_formula_extract(
     );
     let payload: serde_json::Value =
         serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
-    let chunk_id = payload.get("chunk_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let chunk_id = payload
+        .get("chunk_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let source_name = payload
         .get("source_name")
         .and_then(|v| v.as_str())
@@ -813,14 +831,8 @@ async fn drain_formula_extract(
                     Err(e) => warn!(error = %e, "upsert_formula failed"),
                 }
             }
-            let _ = db
-                .increment_usage(UsageKind::Harvester, 0, 0)
-                .await;
-            info!(
-                chunk_id,
-                new_formulas = inserted_n,
-                "formula_extract done"
-            );
+            let _ = db.increment_usage(UsageKind::Harvester, 0, 0).await;
+            info!(chunk_id, new_formulas = inserted_n, "formula_extract done");
             db.finish_agent_task(task.id).await?;
         }
         Err(e) => {
@@ -828,6 +840,107 @@ async fn drain_formula_extract(
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
+    Ok(())
+}
+
+async fn drain_research_request(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    agent: &ResearchRequestAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::ResearchRequest, &batch_id)
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let problem = payload
+        .get("problem")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let max_iterations = payload
+        .get("max_iterations")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2)
+        .clamp(1, 8) as u8;
+    let skills_scope: Vec<String> = payload
+        .get("skills_scope")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if problem.is_empty() {
+        db.fail_agent_task(task.id, "research request: missing problem")
+            .await?;
+        return Ok(());
+    }
+
+    let scope = if skills_scope.is_empty() {
+        vec![problem.clone()]
+    } else {
+        skills_scope.clone()
+    };
+
+    let mut topic_context = Vec::new();
+    for topic in &scope {
+        let s = summarise_topic_by_tag(vault, topic).await;
+        if !s.trim().is_empty() {
+            topic_context.push(format!("## {topic}\n{s}"));
+        }
+    }
+    let topic_refs: Vec<&str> = scope.iter().map(String::as_str).collect();
+    let formula_context: Vec<String> = filter_formulas_for_topics(db, &topic_refs, vault)
+        .await
+        .into_iter()
+        .take(24)
+        .map(|f| format!("{} — {}", f.latex, f.context_caption))
+        .collect();
+
+    let ctx = ResearchContext {
+        problem: problem.clone(),
+        max_iterations,
+        skills_scope,
+        topic_context,
+        formula_context,
+    };
+
+    match agent.run(&ctx).await {
+        Ok(result) => {
+            let dir = vault
+                .vault_dir()
+                .join("Generated")
+                .join("_ResearchRequests");
+            tokio::fs::create_dir_all(&dir).await?;
+            let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+            let filename = format!("research-request-{}-{ts}.md", task.id);
+            let abs = dir.join(filename);
+            let body = format!(
+                "---\nkind: research-request\ntask_id: {}\nproblem: {}\nconfidence: {:.2}\n---\n\n# {}\n\n*{}*\n\n{}",
+                task.id,
+                problem.replace('\n', " "),
+                result.confidence,
+                result.title,
+                result.summary,
+                result.markdown_body
+            );
+            tokio::fs::write(abs, body).await?;
+            db.finish_agent_task(task.id).await?;
+        }
+        Err(e) => {
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+
     Ok(())
 }
 
@@ -844,10 +957,7 @@ async fn filter_formulas_for_topics(
     let mut allowed: std::collections::HashSet<String> = Default::default();
     let re = regex::Regex::new(r"\(([^)]+\.md)\)").unwrap();
     for tag in topic_tags {
-        let topic_file = vault
-            .vault_dir()
-            .join("Topics")
-            .join(format!("{tag}.md"));
+        let topic_file = vault.vault_dir().join("Topics").join(format!("{tag}.md"));
         let content = tokio::fs::read_to_string(&topic_file)
             .await
             .unwrap_or_default();
@@ -954,11 +1064,15 @@ fn parse_yaml_string(content: &str, key: &str) -> Option<String> {
     let mut in_fm = false;
     for line in content.lines() {
         if line.trim() == "---" {
-            if in_fm { return None; }
+            if in_fm {
+                return None;
+            }
             in_fm = true;
             continue;
         }
-        if !in_fm { continue; }
+        if !in_fm {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
             let v = rest.trim().trim_matches('"').to_string();
             return Some(v);
@@ -973,8 +1087,14 @@ fn content_body(content: &str) -> String {
     let mut in_fm = false;
     for line in content.lines() {
         if line.trim() == "---" {
-            if !in_fm { in_fm = true; continue; }
-            if !seen_fm_close { seen_fm_close = true; continue; }
+            if !in_fm {
+                in_fm = true;
+                continue;
+            }
+            if !seen_fm_close {
+                seen_fm_close = true;
+                continue;
+            }
         }
         if seen_fm_close {
             out.push_str(line);
@@ -983,7 +1103,9 @@ fn content_body(content: &str) -> String {
     }
     if out.len() > 4000 {
         let mut cut = 4000;
-        while !out.is_char_boundary(cut) && cut > 0 { cut -= 1; }
+        while !out.is_char_boundary(cut) && cut > 0 {
+            cut -= 1;
+        }
         out.truncate(cut);
         out.push_str("\n…");
     }
