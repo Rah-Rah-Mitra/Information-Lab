@@ -920,7 +920,14 @@ async fn drain_research_request(
                 .vault_dir()
                 .join("Generated")
                 .join("_ResearchRequests");
-            tokio::fs::create_dir_all(&dir).await?;
+            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+                db.fail_agent_task(
+                    task.id,
+                    &format!("research request: failed to create output directory: {e}"),
+                )
+                .await?;
+                return Ok(());
+            }
             let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
             let filename = format!("research-request-{}-{ts}.md", task.id);
             let abs = dir.join(filename);
@@ -933,7 +940,14 @@ async fn drain_research_request(
                 result.summary,
                 result.markdown_body
             );
-            tokio::fs::write(abs, body).await?;
+            if let Err(e) = tokio::fs::write(abs, body).await {
+                db.fail_agent_task(
+                    task.id,
+                    &format!("research request: failed to write note: {e}"),
+                )
+                .await?;
+                return Ok(());
+            }
             db.finish_agent_task(task.id).await?;
         }
         Err(e) => {
