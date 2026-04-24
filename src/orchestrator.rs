@@ -23,6 +23,7 @@ use crate::{
     },
     config::Config,
     db::{AgentTaskKind, Db, UsageKind},
+    formula_norm::normalize_latex_for_dedupe,
     ingest::{ingest_pdf, IngestOutcome},
     scheduler::Scheduler,
     vault::VaultWriter,
@@ -796,7 +797,7 @@ async fn drain_formula_extract(
                 let mut syms = f.symbols.clone();
                 syms.sort();
                 syms.dedup();
-                let latex_norm = syms.join("|");
+                let latex_norm = normalize_latex_for_dedupe(&latex);
                 let symbols_csv = syms.join(",");
                 match db
                     .upsert_formula(
