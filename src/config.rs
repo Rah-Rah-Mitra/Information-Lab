@@ -149,6 +149,8 @@ pub struct Config {
     // ---- Tavily literature search (used only by Bridge iter 2) ----
     /// API key; blank disables the search agent entirely.
     pub tavily_api_key: Option<String>,
+    /// Tavily search endpoint.
+    pub tavily_endpoint: Option<String>,
     /// Vendor monthly ceiling.
     pub tavily_monthly_limit: u32,
     /// Soft per-day cap = monthly / 30 rounded.
@@ -167,6 +169,8 @@ impl Config {
     pub fn from_env() -> AppResult<Self> {
         // Best-effort .env load. Missing file is fine.
         let _ = dotenvy::dotenv();
+        let heavy_model = env_required_any(&["HEAVY_MODEL", "REASONER_MODEL"])?;
+        let reasoner_model = env_or("REASONER_MODEL", &heavy_model);
 
         Ok(Self {
             watch_dir: env_path_or("WATCH_DIR", "./public"),
@@ -175,24 +179,16 @@ impl Config {
             log_dir: env_path_or("LOG_DIR", "./logs"),
 
             api_key: env_required("GOOGLE_API_KEY")?,
-            api_base: env_or(
-                "API_BASE",
-                "https://generativelanguage.googleapis.com/v1beta",
-            ),
+            api_base: env_required("API_BASE")?,
             // Gemma 4 26B A4B — light tier. Own 15 RPM / 1.5K RPD budget on the
             // Google AI Studio free tier; doubles effective throughput when
             // paired with the 31B heavy tier.
-            light_model: env_or("LIGHT_MODEL", "gemma-4-26b-a4b-it"),
+            light_model: env_required("LIGHT_MODEL")?,
             // Gemma 4 31B Dense — heavy reasoner (15 RPM / 1.5K RPD).
-            heavy_model: env_or(
-                "HEAVY_MODEL",
-                // `REASONER_MODEL` is the deprecated name; still honored so
-                // existing .env files keep working.
-                &env_or("REASONER_MODEL", "gemma-4-31b-it"),
-            ),
-            reasoner_model: env_or("REASONER_MODEL", "gemma-4-31b-it"),
+            heavy_model,
+            reasoner_model,
             // Gemini 3.1 Flash-Lite Preview — vision / image routing.
-            vision_model: env_or("VISION_MODEL", "gemini-3.1-flash-lite-preview"),
+            vision_model: env_required("VISION_MODEL")?,
 
             rpm_limit: env_parse("RPM_LIMIT", 14)?,
             index_entry_cap: env_parse("INDEX_ENTRY_CAP", 20_usize)?,
@@ -258,6 +254,9 @@ impl Config {
             tavily_api_key: std::env::var("TAVILY_API_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            tavily_endpoint: std::env::var("TAVILY_ENDPOINT")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             tavily_monthly_limit: env_parse("TAVILY_MONTHLY_LIMIT", 1000_u32)?,
             tavily_daily_soft_cap: env_parse("TAVILY_DAILY_SOFT_CAP", 33_u32)?,
             tavily_per_bridge_cap: env_parse("TAVILY_PER_BRIDGE_CAP", 1_u32)?,
@@ -297,6 +296,17 @@ fn env_required(key: &str) -> AppResult<String> {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_required_any(keys: &[&str]) -> AppResult<String> {
+    for key in keys {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+    Err(AppError::MissingEnv(keys.join(" or ")))
 }
 
 fn env_path_or(key: &str, default: &str) -> PathBuf {

@@ -81,6 +81,7 @@ fn test_cfg() -> Config {
         derivation_min_formulas: 3,
 
         tavily_api_key: None,
+        tavily_endpoint: None,
         tavily_monthly_limit: 1000,
         tavily_daily_soft_cap: 33,
         tavily_per_bridge_cap: 1,
