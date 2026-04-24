@@ -25,8 +25,6 @@ use crate::{
     error::{AppError, AppResult},
 };
 
-const TAVILY_ENDPOINT: &str = "https://api.tavily.com/search";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub title: String,
@@ -81,6 +79,7 @@ struct TavilyResult {
 pub struct LiteratureSearchAgent {
     http: reqwest::Client,
     api_key: Option<String>,
+    endpoint: Option<String>,
     monthly_limit: u32,
     daily_soft_cap: u32,
     per_bridge_cap: u32,
@@ -98,6 +97,7 @@ impl LiteratureSearchAgent {
         Ok(Self {
             http,
             api_key: cfg.tavily_api_key.clone(),
+            endpoint: cfg.tavily_endpoint.clone(),
             monthly_limit: cfg.tavily_monthly_limit,
             daily_soft_cap: cfg.tavily_daily_soft_cap,
             per_bridge_cap: cfg.tavily_per_bridge_cap,
@@ -111,6 +111,14 @@ impl LiteratureSearchAgent {
     pub async fn search(&self, query: &str, bridge_calls_used: u32) -> AppResult<SearchResult> {
         let Some(ref key) = self.api_key else {
             debug!("tavily disabled (no api key)");
+            return Ok(SearchResult {
+                query: query.into(),
+                hits: vec![],
+                used_budget: false,
+            });
+        };
+        let Some(ref endpoint) = self.endpoint else {
+            debug!("tavily disabled (no endpoint)");
             return Ok(SearchResult {
                 query: query.into(),
                 hits: vec![],
@@ -150,7 +158,7 @@ impl LiteratureSearchAgent {
 
         let resp = self
             .http
-            .post(TAVILY_ENDPOINT)
+            .post(endpoint)
             .json(&body)
             .send()
             .await
