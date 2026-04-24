@@ -39,8 +39,7 @@ use super::{
 };
 
 pub const BRIDGE_FINDER_SKILL: &str = include_str!("../../skills/bridge_finder.md");
-pub const BRIDGE_SEARCH_REFINE_SKILL: &str =
-    include_str!("../../skills/bridge_search_refine.md");
+pub const BRIDGE_SEARCH_REFINE_SKILL: &str = include_str!("../../skills/bridge_search_refine.md");
 
 // ----------------------------------------------------------------------------
 // Output schemas
@@ -187,6 +186,7 @@ impl BridgeFinderAgent {
     pub async fn run(&self, pair: TopicPair) -> AppResult<Option<BridgeNote>> {
         let mut proposal = self.propose(&pair).await?;
         let mut iters: u8 = 1;
+        let bridge_search_calls_used: u32 = 0;
 
         // Iter 2: literature-search refine.
         if self.max_iters >= 2 && proposal.confidence < self.tau {
@@ -196,7 +196,7 @@ impl BridgeFinderAgent {
                 pair.topic_a.trim(),
                 pair.topic_b.trim()
             );
-            let hits = self.search.search(&query).await?;
+            let hits = self.search.search(&query, bridge_search_calls_used).await?;
             if !hits.hits.is_empty() {
                 proposal = self.refine_with_search(&proposal, &hits.hits).await?;
             } else {
@@ -216,7 +216,11 @@ impl BridgeFinderAgent {
         }
 
         if proposal.confidence < self.tau {
-            debug!(conf = proposal.confidence, tau = self.tau, "below threshold");
+            debug!(
+                conf = proposal.confidence,
+                tau = self.tau,
+                "below threshold"
+            );
             return Ok(None);
         }
 
@@ -236,8 +240,12 @@ impl BridgeFinderAgent {
              # Role\nPROPOSE\n\n\
              # Topic A\n**{}** (source: {})\n{}\n\n\
              # Topic B\n**{}** (source: {})\n{}\n",
-            pair.topic_a, pair.source_a, pair.summary_a,
-            pair.topic_b, pair.source_b, pair.summary_b,
+            pair.topic_a,
+            pair.source_a,
+            pair.summary_a,
+            pair.topic_b,
+            pair.source_b,
+            pair.summary_b,
         );
         self.call_for_proposal(&prompt, "bridge_proposal").await
     }
@@ -264,16 +272,16 @@ impl BridgeFinderAgent {
         let prompt = format!(
             "{BRIDGE_SEARCH_REFINE_SKILL}\n\n# Current proposal\n{current}\n\n# Search hits\n{hits_block}\n"
         );
-        self.call_for_proposal(&prompt, "bridge_proposal_refined").await
+        self.call_for_proposal(&prompt, "bridge_proposal_refined")
+            .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, proposal))]
     async fn critique(&self, proposal: &BridgeProposal) -> AppResult<BridgeCritique> {
         let _permit = self.limiter.admit(Role::Bridge).await?;
         let current = serde_json::to_string_pretty(proposal).unwrap_or_default();
-        let prompt = format!(
-            "{BRIDGE_FINDER_SKILL}\n\n# Role\nCRITIQUE\n\n# Current proposal\n{current}\n"
-        );
+        let prompt =
+            format!("{BRIDGE_FINDER_SKILL}\n\n# Role\nCRITIQUE\n\n# Current proposal\n{current}\n");
         let messages = vec![ChatMessage::user().content(prompt.clone()).build()];
         let schema = StructuredOutputFormat {
             name: "bridge_critique".into(),
@@ -302,8 +310,9 @@ impl BridgeFinderAgent {
             },
         )
         .await;
-        serde_json::from_str(&text)
-            .map_err(|e| AppError::Schema(format!("parse critique: {e} :: {}", truncate(&text, 400))))
+        serde_json::from_str(&text).map_err(|e| {
+            AppError::Schema(format!("parse critique: {e} :: {}", truncate(&text, 400)))
+        })
     }
 
     async fn call_for_proposal(
@@ -340,15 +349,19 @@ impl BridgeFinderAgent {
             },
         )
         .await;
-        serde_json::from_str(&text)
-            .map_err(|e| AppError::Schema(format!("parse proposal: {e} :: {}", truncate(&text, 400))))
+        serde_json::from_str(&text).map_err(|e| {
+            AppError::Schema(format!("parse proposal: {e} :: {}", truncate(&text, 400)))
+        })
     }
 }
 
 fn render_bridge_markdown(p: &BridgeProposal, iters: u8) -> String {
     let mut s = String::new();
     s.push_str(&format!("# Bridge: {} ↔ {}\n\n", p.topic_a, p.topic_b));
-    s.push_str(&format!("*confidence: {:.2} · iterations: {}*\n\n", p.confidence, iters));
+    s.push_str(&format!(
+        "*confidence: {:.2} · iterations: {}*\n\n",
+        p.confidence, iters
+    ));
     s.push_str("## Hypothesis\n");
     s.push_str(&p.hypothesis);
     s.push_str("\n\n## Rationale\n");

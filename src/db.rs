@@ -25,6 +25,13 @@ pub struct Db {
     pool: SqlitePool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SearchBudgetReservation {
+    pub reserved: bool,
+    pub month_used: u32,
+    pub limit: u32,
+}
+
 impl Db {
     /// Open the pool, enable WAL, run migrations.
     pub async fn open(path: &Path) -> AppResult<Self> {
@@ -138,12 +145,11 @@ impl Db {
     /// Return the distinct doc_hashes touched by a batch (so the caller
     /// can re-check document completion after `mark_batch_done`).
     pub async fn batch_doc_hashes(&self, batch_id: &str) -> AppResult<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?",
-        )
-        .bind(batch_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT doc_hash FROM chunks WHERE batch_id = ?")
+                .bind(batch_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows)
     }
 
@@ -224,10 +230,12 @@ impl Db {
     }
 
     pub async fn mark_batch_done(&self, batch_id: &str) -> AppResult<()> {
-        sqlx::query("UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?")
-            .bind(batch_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE chunks SET state = 'done', updated_at = datetime('now') WHERE batch_id = ?",
+        )
+        .bind(batch_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -306,13 +314,11 @@ impl Db {
             tx.rollback().await?;
             return Ok(None);
         };
-        sqlx::query(
-            "UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?",
-        )
-        .bind(batch_id)
-        .bind(task.id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE agent_tasks SET state = 'running', batch_id = ? WHERE id = ?")
+            .bind(batch_id)
+            .bind(task.id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(Some(task))
     }
@@ -340,10 +346,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn agent_task_pending_count(
-        &self,
-        kind: AgentTaskKind,
-    ) -> AppResult<i64> {
+    pub async fn agent_task_pending_count(&self, kind: AgentTaskKind) -> AppResult<i64> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM agent_tasks
              WHERE kind = ? AND state IN ('pending','running')",
@@ -397,12 +400,12 @@ impl Db {
     // -----------------------------------------------------------------------
 
     pub async fn topic_snapshot(&self, topic: &str) -> AppResult<Option<i64>> {
-        Ok(sqlx::query_scalar(
-            "SELECT entry_count FROM topic_snapshots WHERE topic = ?",
+        Ok(
+            sqlx::query_scalar("SELECT entry_count FROM topic_snapshots WHERE topic = ?")
+                .bind(topic)
+                .fetch_optional(&self.pool)
+                .await?,
         )
-        .bind(topic)
-        .fetch_optional(&self.pool)
-        .await?)
     }
 
     pub async fn upsert_topic_snapshot(
@@ -531,19 +534,62 @@ impl Db {
     // Tavily monthly budget.
     // -----------------------------------------------------------------------
 
-    pub async fn search_usage_this_month(&self) -> AppResult<i64> {
+    pub async fn try_reserve_search_call(
+        &self,
+        monthly_limit: u32,
+        daily_soft_cap: Option<u32>,
+        per_bridge_cap: Option<u32>,
+        bridge_calls_used: u32,
+    ) -> AppResult<SearchBudgetReservation> {
+        let mut tx = self.pool.begin().await?;
         let month = Utc::now().format("%Y-%m").to_string();
-        Ok(sqlx::query_scalar(
-            "SELECT calls FROM search_usage WHERE month = ?",
-        )
-        .bind(&month)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(0))
-    }
+        let day = Utc::now().format("%Y-%m-%d").to_string();
 
-    pub async fn increment_search_usage(&self) -> AppResult<()> {
-        let month = Utc::now().format("%Y-%m").to_string();
+        let month_used_before: i64 =
+            sqlx::query_scalar("SELECT calls FROM search_usage WHERE month = ?")
+                .bind(&month)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(0);
+
+        let month_used_before_u32 = month_used_before as u32;
+        if month_used_before_u32 >= monthly_limit {
+            tx.rollback().await?;
+            return Ok(SearchBudgetReservation {
+                reserved: false,
+                month_used: month_used_before_u32,
+                limit: monthly_limit,
+            });
+        }
+
+        if let Some(daily_limit) = daily_soft_cap {
+            let day_used: i64 =
+                sqlx::query_scalar("SELECT calls FROM search_usage_daily WHERE day = ?")
+                    .bind(&day)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or(0);
+            if (day_used as u32) >= daily_limit {
+                tx.rollback().await?;
+                return Ok(SearchBudgetReservation {
+                    reserved: false,
+                    month_used: month_used_before_u32,
+                    limit: monthly_limit,
+                });
+            }
+        }
+
+        if let Some(bridge_limit) = per_bridge_cap {
+            if bridge_calls_used >= bridge_limit {
+                tx.rollback().await?;
+                return Ok(SearchBudgetReservation {
+                    reserved: false,
+                    month_used: month_used_before_u32,
+                    limit: monthly_limit,
+                });
+            }
+        }
+
         sqlx::query(
             "INSERT INTO search_usage (month, calls, last_call_at)
              VALUES (?, 1, datetime('now'))
@@ -551,8 +597,53 @@ impl Db {
                  calls = calls + 1, last_call_at = datetime('now')",
         )
         .bind(&month)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        sqlx::query(
+            "INSERT INTO search_usage_daily (day, calls, last_call_at)
+             VALUES (?, 1, datetime('now'))
+             ON CONFLICT(day) DO UPDATE SET
+                 calls = calls + 1, last_call_at = datetime('now')",
+        )
+        .bind(&day)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(SearchBudgetReservation {
+            reserved: true,
+            month_used: month_used_before_u32.saturating_add(1),
+            limit: monthly_limit,
+        })
+    }
+
+    pub async fn rollback_reserved_search_call(&self) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+        let month = Utc::now().format("%Y-%m").to_string();
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+
+        sqlx::query(
+            "UPDATE search_usage
+             SET calls = CASE WHEN calls > 0 THEN calls - 1 ELSE 0 END,
+                 last_call_at = datetime('now')
+             WHERE month = ?",
+        )
+        .bind(&month)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE search_usage_daily
+             SET calls = CASE WHEN calls > 0 THEN calls - 1 ELSE 0 END,
+                 last_call_at = datetime('now')
+             WHERE day = ?",
+        )
+        .bind(&day)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -618,10 +709,9 @@ impl Db {
     }
 
     pub async fn pending_count(&self) -> AppResult<i64> {
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
-                .fetch_one(&self.pool)
-                .await?;
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunks WHERE state = 'pending'")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(n)
     }
 
@@ -727,10 +817,7 @@ impl Db {
         Ok(())
     }
 
-    pub async fn list_recent_agent_events(
-        &self,
-        limit: i64,
-    ) -> AppResult<Vec<AgentEventRow>> {
+    pub async fn list_recent_agent_events(&self, limit: i64) -> AppResult<Vec<AgentEventRow>> {
         Ok(sqlx::query_as(
             "SELECT id, ts, trace_id, span_id, parent_span_id, agent_role,
                     event_kind, input_summary, output_summary, thinking,
