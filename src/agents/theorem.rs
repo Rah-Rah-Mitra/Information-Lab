@@ -112,7 +112,12 @@ impl TheoremProverAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build theorem llm: {e}")))?;
-        Ok(Self { llm, limiter, db, model })
+        Ok(Self {
+            llm,
+            limiter,
+            db,
+            model,
+        })
     }
 
     #[tracing::instrument(
@@ -183,6 +188,12 @@ impl TheoremProverAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )

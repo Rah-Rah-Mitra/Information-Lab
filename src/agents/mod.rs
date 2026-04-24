@@ -29,14 +29,14 @@ pub mod extractor;
 pub mod formula_extractor;
 pub mod harvester;
 pub mod report;
-pub mod research;
+pub mod research_request;
 pub mod retrier;
 pub mod search;
 pub mod theorem;
 
-pub use extractor::{KgOutput, KnowledgeGraphAgent};
 #[allow(unused_imports)]
 pub use extractor::Relationship;
+pub use extractor::{KgOutput, KnowledgeGraphAgent};
 
 // ----------------------------------------------------------------------------
 // Skill prompts — compiled into the binary; see `skills/*.md`.
@@ -209,6 +209,12 @@ pub(crate) struct AgentCall<'a> {
     pub output: &'a str,
     pub thinking: Option<&'a str>,
     pub payload_json: Option<&'a str>,
+    pub research_request_id: Option<&'a str>,
+    pub step_index: Option<i64>,
+    pub phase: Option<&'a str>,
+    pub tool_name: Option<&'a str>,
+    pub model_name: Option<&'a str>,
+    pub artifact_path: Option<&'a str>,
     pub started: Instant,
 }
 
@@ -228,7 +234,7 @@ pub(crate) async fn record_agent_call(db: &Db, call: AgentCall<'_>) -> AppResult
     // Mirror onto the active span so Jaeger sees the same event.
     tracing::info!(
         agent.role = role_name,
-        agent.event = "call",
+        agent.event = "llm_call",
         tokens.sent = tokens_sent,
         tokens.received = tokens_received,
         duration_ms,
@@ -242,7 +248,7 @@ pub(crate) async fn record_agent_call(db: &Db, call: AgentCall<'_>) -> AppResult
         span_id.as_deref(),
         parent_span_id.as_deref(),
         role_name,
-        "call",
+        "llm_call",
         Some(&input_summary),
         Some(&output_summary),
         call.thinking,
@@ -250,6 +256,12 @@ pub(crate) async fn record_agent_call(db: &Db, call: AgentCall<'_>) -> AppResult
         tokens_sent,
         tokens_received,
         Some(duration_ms),
+        call.research_request_id,
+        call.step_index,
+        call.phase,
+        call.tool_name,
+        call.model_name,
+        call.artifact_path,
     )
     .await?;
 
@@ -257,4 +269,37 @@ pub(crate) async fn record_agent_call(db: &Db, call: AgentCall<'_>) -> AppResult
         .await?;
 
     Ok((tokens_sent, tokens_received))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use super::role_to_usage_kind;
+    use crate::{db::Db, limiter::Role};
+
+    #[tokio::test]
+    async fn role_usage_mapping_increments_expected_counter() {
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("usage-mapping.sqlite3");
+        let db = Db::open(&db_path).await.expect("open db");
+        let today = Utc::now().date_naive();
+
+        for role in Role::all() {
+            db.increment_usage(role_to_usage_kind(*role), 0, 0)
+                .await
+                .expect("increment usage");
+        }
+
+        let usage = db.usage_for(today).await.expect("load usage row");
+        assert_eq!(usage.reasoner_calls, 1);
+        assert_eq!(usage.curator_calls, 1);
+        assert_eq!(usage.bridge_calls, 1);
+        assert_eq!(usage.harvester_calls, 1);
+        assert_eq!(usage.theorem_calls, 1);
+        assert_eq!(usage.derivation_calls, 1);
+        assert_eq!(usage.report_calls, 1);
+        assert_eq!(usage.formula_extract_calls, 1);
+    }
 }

@@ -23,7 +23,10 @@ use crate::{
     limiter::{Limiter, Role},
 };
 
-use super::{record_agent_call, scrub_llm_text, truncate, AgentCall, KG_EXTRACTOR_SKILL, OBSIDIAN_WRITER_SKILL};
+use super::{
+    record_agent_call, scrub_llm_text, truncate, AgentCall, KG_EXTRACTOR_SKILL,
+    OBSIDIAN_WRITER_SKILL,
+};
 
 // ----------------------------------------------------------------------------
 // Output schema
@@ -160,13 +163,20 @@ impl KnowledgeGraphAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )
         .await?;
 
-        let mut parsed: KgOutput = serde_json::from_str(&text)
-            .map_err(|e| AppError::Schema(format!("parse kg json: {e} :: {}", truncate(&text, 400))))?;
+        let mut parsed: KgOutput = serde_json::from_str(&text).map_err(|e| {
+            AppError::Schema(format!("parse kg json: {e} :: {}", truncate(&text, 400)))
+        })?;
 
         parsed.title = scrub_llm_text(&parsed.title);
         parsed.summary = scrub_llm_text(&parsed.summary);

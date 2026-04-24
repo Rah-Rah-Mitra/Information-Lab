@@ -43,7 +43,7 @@ use crate::agents::bridge::BridgeNote;
 use crate::agents::curator::{Formula, TopicSynthesis};
 use crate::agents::derivation::DerivationChainNote;
 use crate::agents::report::DailyReport;
-use crate::agents::research::ResearchResult;
+use crate::agents::research_request::ResearchResult;
 use crate::agents::theorem::TheoremNote;
 use crate::agents::KgOutput;
 use crate::error::{AppError, AppResult};

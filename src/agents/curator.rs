@@ -139,7 +139,12 @@ impl TopicCuratorAgent {
             .timeout_seconds(120)
             .build()
             .map_err(|e| AppError::other(format!("build curator llm: {e}")))?;
-        Ok(Self { llm, limiter, db, model })
+        Ok(Self {
+            llm,
+            limiter,
+            db,
+            model,
+        })
     }
 
     #[tracing::instrument(
@@ -190,12 +195,19 @@ impl TopicCuratorAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )
         .await;
-        let parsed: TopicSynthesis = serde_json::from_str(&text)
-            .map_err(|e| AppError::Schema(format!("parse synthesis: {e} :: {}", truncate(&text, 400))))?;
+        let parsed: TopicSynthesis = serde_json::from_str(&text).map_err(|e| {
+            AppError::Schema(format!("parse synthesis: {e} :: {}", truncate(&text, 400)))
+        })?;
         debug!(formulas = parsed.formulas.len(), "curate ok");
         Ok(parsed)
     }

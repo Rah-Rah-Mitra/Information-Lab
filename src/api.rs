@@ -1,81 +1,85 @@
-//! Minimal HTTP endpoint to enqueue independent research tasks.
+//! Lightweight read-only research timeline API.
 
-use std::sync::Arc;
+use std::net::SocketAddr;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    response::IntoResponse,
+    routing::get,
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tokio::net::TcpListener;
+use serde::Serialize;
 use tracing::{error, info};
 
-use crate::db::{AgentTaskKind, Db};
+use crate::db::{AgentEventRow, Db, ResearchSummary};
 
 #[derive(Clone)]
 struct ApiState {
     db: Db,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ResearchRequest {
-    pub query: String,
-    #[serde(default)]
-    pub max_web_queries: Option<u8>,
-}
-
 #[derive(Debug, Serialize)]
-pub struct ResearchQueued {
-    pub task_id: i64,
-    pub kind: &'static str,
+struct ResearchEnvelope {
+    summary: ResearchSummary,
+    events: Vec<AgentEventRow>,
 }
 
-pub async fn spawn(db: Db, bind: String) {
-    let state = Arc::new(ApiState { db });
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/research/request", post(enqueue_research))
-        .with_state(state);
+pub fn spawn(db: Db, bind: String) {
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route("/research/{id}", get(get_research))
+            .route("/research/{id}/events", get(get_research_events))
+            .with_state(ApiState { db });
 
-    match TcpListener::bind(&bind).await {
-        Ok(listener) => {
-            info!(bind = %bind, "research api listening");
-            tokio::spawn(async move {
+        let Ok(addr): Result<SocketAddr, _> = bind.parse() else {
+            error!(%bind, "invalid RESEARCH_API_BIND; api disabled");
+            return;
+        };
+
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                info!(%addr, "research api listening");
                 if let Err(e) = axum::serve(listener, app).await {
-                    error!(error = %e, "research api server failed");
+                    error!(error = %e, "research api server exited");
                 }
-            });
+            }
+            Err(e) => {
+                error!(error = %e, %addr, "failed to bind research api");
+            }
         }
-        Err(e) => {
-            error!(bind = %bind, error = %e, "research api bind failed");
-        }
+    });
+}
+
+async fn get_research_events(
+    Path(id): Path<String>,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    match state.db.list_research_events(&id).await {
+        Ok(events) => (StatusCode::OK, Json(events)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-async fn healthz() -> &'static str {
-    "ok"
-}
-
-async fn enqueue_research(
-    State(state): State<Arc<ApiState>>,
-    Json(req): Json<ResearchRequest>,
-) -> Result<Json<ResearchQueued>, (StatusCode, String)> {
-    let payload = json!({
-        "query": req.query,
-        "max_web_queries": req.max_web_queries.unwrap_or(2).clamp(1, 4),
-    });
-
-    let id = state
-        .db
-        .enqueue_agent_task(AgentTaskKind::Research, &payload)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(ResearchQueued {
-        task_id: id,
-        kind: "Research",
-    }))
+async fn get_research(Path(id): Path<String>, State(state): State<ApiState>) -> impl IntoResponse {
+    match state.db.get_research_summary(&id).await {
+        Ok(Some(summary)) => {
+            let events = state.db.list_research_events(&id).await.unwrap_or_default();
+            (StatusCode::OK, Json(ResearchEnvelope { summary, events })).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"research request not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
