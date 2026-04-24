@@ -6,12 +6,16 @@ This guide covers system internals, extension points, and expected engineering p
 
 ## 2) Codebase map
 
-- `src/orchestrator.rs`: task spawning and runtime coordination.
-- `src/api.rs`: lightweight HTTP API for research request enqueue + timeline reads.
+- `src/main.rs`: runtime bootstrap, model preflight, task loop wiring, graceful shutdown.
+- `src/orchestrator.rs`: ingest/reason/research/task-drain execution loops.
+- `src/scheduler.rs`: periodic task enqueue logic (curate/bridge/theorem/derivation/report).
+- `src/api.rs`: HTTP API (`/research/request`, `/research/{id}`, `/research/{id}/events`).
+- `src/status.rs`: monitoring document writer (`SYSTEM_STATUS.md`).
 - `src/workflow.rs`: Sequential / Parallel / Loop workflow primitives.
 - `src/agents/*.rs`: role-specific agent implementations.
-- `src/db.rs` + `migrations/*.sql`: persistence and task state.
-- `src/vault.rs`: markdown and index writing.
+- `src/db.rs` + `migrations/*.sql`: persistence, queue state, event/usage tracking.
+- `src/vault.rs`: markdown artifact/index writing and index splitting.
+- `src/telemetry.rs`: tracing layers + optional OTLP exporter setup.
 - `skills/*.md`: model behavior specs/prompts.
 - `.github/workflows/ci-cd.yml`: CI build/test and tag-gated release artifact pipeline.
 
@@ -28,6 +32,8 @@ flowchart LR
 ```
 
 ## 4) Agent systems available
+
+Each role maps to a concrete `AgentTaskKind` and consumes either the light or heavy limiter tier.
 
 ### Core extraction
 
@@ -48,6 +54,13 @@ flowchart LR
 ### Tooling/system agents
 
 - **LiteratureSearch**: constrained external search (bridge loop support).
+
+### Monitoring + observability surfaces
+
+- **Status writer**: periodic `SYSTEM_STATUS.md` queue/usage/progress summary.
+- **Agent events**: persisted to DB for timeline/debug and surfaced in status/API reads.
+- **Research API**: ad-hoc request lifecycle introspection endpoints.
+- **OpenTelemetry**: optional OTLP exporter (`OTEL_EXPORTER_OTLP_ENDPOINT`).
 
 ## 5) Add a new agent (standard workflow)
 
