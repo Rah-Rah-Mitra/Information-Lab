@@ -108,6 +108,18 @@ pub struct Config {
     /// Research tick (curator + bridge in parallel).
     pub research_interval: Duration,
 
+    /// HTTP bind address for research timeline query API.
+    pub research_api_bind: String,
+
+    /// Policy for storing optional model reasoning text (`thinking`).
+    ///
+    /// * `retain`   — store as-is (up to `thinking_max_bytes`)
+    /// * `redact`   — store `[redacted]` marker when present
+    /// * `discard`  — never store
+    pub thinking_redaction_policy: String,
+    /// Maximum bytes persisted for optional `thinking` payloads.
+    pub thinking_max_bytes: usize,
+
     /// Overrides for per-role models. Blank falls back to `heavy_model`.
     pub curator_model: String,
     pub bridge_model: String,
@@ -218,14 +230,11 @@ impl Config {
             bridge_max_jaccard: env_parse("BRIDGE_MAX_JACCARD", 0.6_f32)?,
 
             harvest_every_n: env_parse("HARVEST_EVERY_N", 25_usize)?,
-            scheduler_interval: Duration::from_secs(env_parse(
-                "SCHEDULER_INTERVAL_SECS",
-                60_u64,
-            )?),
-            research_interval: Duration::from_secs(env_parse(
-                "RESEARCH_INTERVAL_SECS",
-                30_u64,
-            )?),
+            scheduler_interval: Duration::from_secs(env_parse("SCHEDULER_INTERVAL_SECS", 60_u64)?),
+            research_interval: Duration::from_secs(env_parse("RESEARCH_INTERVAL_SECS", 30_u64)?),
+            research_api_bind: env_or("RESEARCH_API_BIND", "127.0.0.1:8090"),
+            thinking_redaction_policy: env_or("THINKING_REDACTION_POLICY", "redact"),
+            thinking_max_bytes: env_parse("THINKING_MAX_BYTES", 2048_usize)?,
 
             curator_model: env_or("CURATOR_MODEL", ""),
             bridge_model: env_or("BRIDGE_MODEL", ""),

@@ -61,6 +61,9 @@ fn test_cfg() -> Config {
         harvest_every_n: 25,
         scheduler_interval: Duration::from_secs(60),
         research_interval: Duration::from_secs(30),
+        research_api_bind: "127.0.0.1:0".into(),
+        thinking_redaction_policy: "redact".into(),
+        thinking_max_bytes: 512,
 
         curator_model: String::new(),
         bridge_model: String::new(),
@@ -95,21 +98,15 @@ async fn light_and_heavy_tiers_admit_independently() {
     // One admission on each tier should each succeed immediately. The
     // per-role semaphore only blocks *within* a role, so running light
     // then heavy back-to-back exercises independent tier governors.
-    let p_light = tokio::time::timeout(
-        Duration::from_secs(1),
-        lim.admit(Role::Extractor),
-    )
-    .await
-    .expect("light admit timed out")
-    .expect("light admit errored");
+    let p_light = tokio::time::timeout(Duration::from_secs(1), lim.admit(Role::Extractor))
+        .await
+        .expect("light admit timed out")
+        .expect("light admit errored");
 
-    let p_heavy = tokio::time::timeout(
-        Duration::from_secs(1),
-        lim.admit(Role::Curator),
-    )
-    .await
-    .expect("heavy admit timed out")
-    .expect("heavy admit errored");
+    let p_heavy = tokio::time::timeout(Duration::from_secs(1), lim.admit(Role::Curator))
+        .await
+        .expect("heavy admit timed out")
+        .expect("heavy admit errored");
 
     drop(p_light);
     drop(p_heavy);

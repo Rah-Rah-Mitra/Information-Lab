@@ -9,14 +9,12 @@ use tracing::{info, warn};
 
 use edge_kg_agent::{
     agents::{
-        bridge::BridgeFinderAgent, curator::TopicCuratorAgent,
-        derivation::DerivationChainAgent,
-        formula_extractor::FormulaExtractorAgent,
-        harvester::FormulaHarvesterAgent,
-        report::ReportWriterAgent, retrier::ErrorRetrierAgent,
-        search::LiteratureSearchAgent, theorem::TheoremProverAgent,
-        KnowledgeGraphAgent,
+        bridge::BridgeFinderAgent, curator::TopicCuratorAgent, derivation::DerivationChainAgent,
+        formula_extractor::FormulaExtractorAgent, harvester::FormulaHarvesterAgent,
+        report::ReportWriterAgent, retrier::ErrorRetrierAgent, search::LiteratureSearchAgent,
+        theorem::TheoremProverAgent, KnowledgeGraphAgent,
     },
+    api,
     config::Config,
     db::Db,
     error::AppResult,
@@ -63,7 +61,12 @@ async fn run() -> AppResult<()> {
     log_effective_models(&cfg);
     validate_models(&cfg).await?;
 
-    let db = Db::open(&cfg.db_path).await?;
+    let db = Db::open(
+        &cfg.db_path,
+        &cfg.thinking_redaction_policy,
+        cfg.thinking_max_bytes,
+    )
+    .await?;
     let requeued = db.requeue_orphans().await?;
     if requeued > 0 {
         info!(requeued, "recovered orphaned batches from previous run");
@@ -81,10 +84,8 @@ async fn run() -> AppResult<()> {
     // keyed on its role's model override, but all share `limiter`.
     let search_agent = LiteratureSearchAgent::new(&cfg, db.clone())?;
     let curator_agent = TopicCuratorAgent::new(&cfg, limiter.clone(), db.clone())?;
-    let bridge_agent =
-        BridgeFinderAgent::new(&cfg, limiter.clone(), db.clone(), search_agent)?;
-    let harvester_agent =
-        FormulaHarvesterAgent::new(cfg.vault_dir.clone(), db.clone())?;
+    let bridge_agent = BridgeFinderAgent::new(&cfg, limiter.clone(), db.clone(), search_agent)?;
+    let harvester_agent = FormulaHarvesterAgent::new(cfg.vault_dir.clone(), db.clone())?;
     let retrier_agent = ErrorRetrierAgent::new(&cfg, db.clone());
     let theorem_agent = TheoremProverAgent::new(&cfg, limiter.clone(), db.clone())?;
     let derivation_agent = DerivationChainAgent::new(&cfg, limiter.clone(), db.clone())?;
@@ -96,6 +97,7 @@ async fn run() -> AppResult<()> {
 
     // Status heartbeat.
     status::spawn(db.clone(), cfg.vault_dir.clone(), cfg.status_interval);
+    api::spawn(db.clone(), cfg.research_api_bind.clone());
 
     // Filesystem watcher → orchestrator ingest consumer.
     let rx = watcher::spawn(cfg.watch_dir.clone(), cfg.fs_debounce)?;

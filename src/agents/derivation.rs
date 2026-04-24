@@ -25,8 +25,7 @@ use crate::{
 
 use super::{curator::Formula, truncate};
 
-pub const DERIVATION_CHAIN_SKILL: &str =
-    include_str!("../../skills/derivation_chain.md");
+pub const DERIVATION_CHAIN_SKILL: &str = include_str!("../../skills/derivation_chain.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivationStep {
@@ -95,7 +94,12 @@ impl DerivationChainAgent {
             .timeout_seconds(180)
             .build()
             .map_err(|e| AppError::other(format!("build derivation llm: {e}")))?;
-        Ok(Self { llm, limiter, db, model })
+        Ok(Self {
+            llm,
+            limiter,
+            db,
+            model,
+        })
     }
 
     #[tracing::instrument(
@@ -155,6 +159,12 @@ impl DerivationChainAgent {
                 output: &text,
                 thinking: None,
                 payload_json: None,
+                research_request_id: None,
+                step_index: None,
+                phase: Some("llm_call"),
+                tool_name: None,
+                model_name: None,
+                artifact_path: None,
                 started,
             },
         )

@@ -28,6 +28,55 @@ use crate::{
     vault::VaultWriter,
 };
 
+#[derive(Clone, Copy)]
+struct ResearchCtx<'a> {
+    request_id: &'a str,
+    role: &'a str,
+}
+
+async fn emit_research_event(
+    db: &Db,
+    ctx: ResearchCtx<'_>,
+    event_kind: &str,
+    step_index: i64,
+    phase: &str,
+    input_summary: Option<&str>,
+    output_summary: Option<&str>,
+    tool_name: Option<&str>,
+    artifact_path: Option<&str>,
+) {
+    tracing::info!(
+        research_request_id = %ctx.request_id,
+        agent_role = %ctx.role,
+        step_index,
+        event_kind,
+        phase,
+        "research lifecycle event"
+    );
+    let _ = db
+        .insert_agent_event(
+            None,
+            None,
+            None,
+            ctx.role,
+            event_kind,
+            input_summary,
+            output_summary,
+            None,
+            None,
+            0,
+            0,
+            None,
+            Some(ctx.request_id),
+            Some(step_index),
+            Some(phase),
+            tool_name,
+            None,
+            artifact_path,
+        )
+        .await;
+}
+
 pub struct Orchestrator {
     cfg: Config,
     db: Db,
@@ -36,12 +85,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new(
-        cfg: Config,
-        db: Db,
-        kg: KnowledgeGraphAgent,
-        vault: VaultWriter,
-    ) -> Self {
+    pub fn new(cfg: Config, db: Db, kg: KnowledgeGraphAgent, vault: VaultWriter) -> Self {
         Self {
             cfg,
             db,
@@ -60,7 +104,10 @@ impl Orchestrator {
         tokio::spawn(async move {
             while let Some(path) = rx.recv().await {
                 let span = tracing::info_span!("ingest", path = %path.display());
-                match ingest_pdf(&db, &watch_dir, &path, tau).instrument(span).await {
+                match ingest_pdf(&db, &watch_dir, &path, tau)
+                    .instrument(span)
+                    .await
+                {
                     Ok(IngestOutcome::Ingested { hash, chunks }) => {
                         info!(%hash, chunks, "ingested");
                     }
@@ -142,19 +189,16 @@ impl Orchestrator {
 
                             if let Err(e) = vault.write_note(&source_name, &out).await {
                                 error!(error = %e, "vault write failed");
-                                let _ = db
-                                    .mark_batch_error(&batch_id, &format!("vault: {e}"))
-                                    .await;
+                                let _ =
+                                    db.mark_batch_error(&batch_id, &format!("vault: {e}")).await;
                                 continue;
                             }
 
                             // Capture doc_hashes touched by this batch BEFORE
                             // mark_batch_done flips state to 'done', so we can
                             // check per-document completion afterwards.
-                            let touched_docs = db
-                                .batch_doc_hashes(&batch_id)
-                                .await
-                                .unwrap_or_default();
+                            let touched_docs =
+                                db.batch_doc_hashes(&batch_id).await.unwrap_or_default();
 
                             if let Err(e) = db.mark_batch_done(&batch_id).await {
                                 error!(error = %e, "mark_batch_done failed");
@@ -189,11 +233,7 @@ impl Orchestrator {
 
     /// Research tick: every `cfg.research_interval`, drain up to one
     /// Curate and one Bridge task concurrently (Parallel workflow shape).
-    pub fn spawn_research(
-        &self,
-        curator: TopicCuratorAgent,
-        bridge: BridgeFinderAgent,
-    ) {
+    pub fn spawn_research(&self, curator: TopicCuratorAgent, bridge: BridgeFinderAgent) {
         let db = self.db.clone();
         let vault = self.vault.clone();
         let interval = self.cfg.research_interval;
@@ -230,9 +270,7 @@ impl Orchestrator {
                 ticker.tick().await;
                 // Drain any queued Harvest tasks (scheduler enqueues them).
                 let batch_id = Uuid::new_v4().to_string();
-                let claimed = db
-                    .claim_agent_task(AgentTaskKind::Harvest, &batch_id)
-                    .await;
+                let claimed = db.claim_agent_task(AgentTaskKind::Harvest, &batch_id).await;
                 match claimed {
                     Ok(Some(task)) => {
                         match harvester.harvest(64).await {
@@ -247,36 +285,26 @@ impl Orchestrator {
                                     Ok(rows) => {
                                         let formulas = rows
                                             .into_iter()
-                                            .map(|r| {
-                                                crate::agents::curator::Formula {
-                                                    latex: r.latex,
-                                                    symbols: r
-                                                        .symbols
-                                                        .unwrap_or_default()
-                                                        .split(',')
-                                                        .filter(|s| !s.is_empty())
-                                                        .map(|s| s.to_string())
-                                                        .collect(),
-                                                    context_caption: r
-                                                        .context
-                                                        .unwrap_or_default(),
-                                                    note_rel_path: r.note_rel_path,
-                                                    derived: false,
-                                                }
+                                            .map(|r| crate::agents::curator::Formula {
+                                                latex: r.latex,
+                                                symbols: r
+                                                    .symbols
+                                                    .unwrap_or_default()
+                                                    .split(',')
+                                                    .filter(|s| !s.is_empty())
+                                                    .map(|s| s.to_string())
+                                                    .collect(),
+                                                context_caption: r.context.unwrap_or_default(),
+                                                note_rel_path: r.note_rel_path,
+                                                derived: false,
                                             })
                                             .collect::<Vec<_>>();
-                                        if let Err(e) =
-                                            vault.write_formulas_index(&formulas).await
+                                        if let Err(e) = vault.write_formulas_index(&formulas).await
                                         {
                                             warn!(error = %e, "formulas index write failed");
                                         }
-                                        if let Err(e) = db
-                                            .increment_usage(
-                                                UsageKind::Harvester,
-                                                0,
-                                                0,
-                                            )
-                                            .await
+                                        if let Err(e) =
+                                            db.increment_usage(UsageKind::Harvester, 0, 0).await
                                         {
                                             warn!(error = %e, "usage increment failed");
                                         }
@@ -418,11 +446,43 @@ async fn drain_curate(
     curator: &TopicCuratorAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Curate, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Curate, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
-    let payload: serde_json::Value = serde_json::from_str(&task.payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "curator",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("curate task parsed"),
+        None,
+        None,
+    )
+    .await;
     let topic = payload
         .get("topic")
         .and_then(|v| v.as_str())
@@ -459,22 +519,94 @@ async fn drain_curate(
         });
     }
     if notes.is_empty() {
+        emit_research_event(
+            db,
+            ctx,
+            "failed",
+            2,
+            "failed",
+            None,
+            Some("no notes resolvable"),
+            None,
+            None,
+        )
+        .await;
         db.fail_agent_task(task.id, "no notes resolvable").await?;
         return Ok(());
     }
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("notes loaded"),
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "llm_call",
+        Some(&topic),
+        None,
+        None,
+        None,
+    )
+    .await;
 
     match curator.curate(&topic, &notes).await {
         Ok(syn) => {
             if let Err(e) = vault.write_synthesis(&syn).await {
                 error!(error = %e, "synthesis vault write failed");
+                emit_research_event(
+                    db,
+                    ctx,
+                    "failed",
+                    5,
+                    "failed",
+                    None,
+                    Some(&e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
                 db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
             } else {
                 let _ = db.increment_usage(UsageKind::Curator, 0, 0).await;
+                emit_research_event(
+                    db,
+                    ctx,
+                    "finalized",
+                    5,
+                    "finalize",
+                    None,
+                    Some("synthesis written"),
+                    None,
+                    None,
+                )
+                .await;
                 db.finish_agent_task(task.id).await?;
             }
         }
         Err(e) => {
             error!(error = %e, "curator failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -488,11 +620,43 @@ async fn drain_bridge(
     tau: f32,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Bridge, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Bridge, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
-    let payload: serde_json::Value = serde_json::from_str(&task.payload)
-        .unwrap_or(serde_json::Value::Null);
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "bridge",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("bridge task parsed"),
+        None,
+        None,
+    )
+    .await;
     let s = |k: &str| {
         payload
             .get(k)
@@ -508,10 +672,70 @@ async fn drain_bridge(
         summary_a: summarise_topic(vault, &s("topic_a"), &payload, "notes_a").await,
         summary_b: summarise_topic(vault, &s("topic_b"), &payload, "notes_b").await,
     };
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("topic summaries loaded"),
+        None,
+        None,
+    )
+    .await;
 
     match bridge.run(pair.clone()).await {
         Ok(Some(note)) => {
+            emit_research_event(
+                db,
+                ctx,
+                "llm_call",
+                3,
+                "llm_call",
+                None,
+                Some("bridge proposal generated"),
+                None,
+                None,
+            )
+            .await;
+            emit_research_event(
+                db,
+                ctx,
+                "tool_call",
+                4,
+                "tool_call",
+                None,
+                Some("literature search considered"),
+                Some("tavily"),
+                None,
+            )
+            .await;
+            emit_research_event(
+                db,
+                ctx,
+                "critique",
+                5,
+                "critique",
+                None,
+                Some("bridge critique complete"),
+                None,
+                None,
+            )
+            .await;
             if note.proposal.confidence < tau {
+                emit_research_event(
+                    db,
+                    ctx,
+                    "finalized",
+                    6,
+                    "finalize",
+                    None,
+                    Some("below threshold"),
+                    None,
+                    None,
+                )
+                .await;
                 db.finish_agent_task(task.id).await?;
                 return Ok(());
             }
@@ -533,19 +757,67 @@ async fn drain_bridge(
                         )
                         .await;
                     let _ = db.increment_usage(UsageKind::Bridge, 0, 0).await;
+                    emit_research_event(
+                        db,
+                        ctx,
+                        "finalized",
+                        6,
+                        "finalize",
+                        None,
+                        Some("bridge written"),
+                        None,
+                        Some(&rel),
+                    )
+                    .await;
                     db.finish_agent_task(task.id).await?;
                 }
                 Err(e) => {
                     error!(error = %e, "bridge vault write failed");
+                    emit_research_event(
+                        db,
+                        ctx,
+                        "failed",
+                        6,
+                        "failed",
+                        None,
+                        Some(&e.to_string()),
+                        None,
+                        None,
+                    )
+                    .await;
                     db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
                 }
             }
         }
         Ok(None) => {
+            emit_research_event(
+                db,
+                ctx,
+                "finalized",
+                6,
+                "finalize",
+                None,
+                Some("bridge rejected"),
+                None,
+                None,
+            )
+            .await;
             db.finish_agent_task(task.id).await?;
         }
         Err(e) => {
             error!(error = %e, "bridge failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                6,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -558,9 +830,41 @@ async fn drain_theorem(
     theorem: &TheoremProverAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Theorem, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Theorem, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "theorem",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("theorem task parsed"),
+        None,
+        None,
+    )
+    .await;
     info!(
         target: "agent.spawn",
         role = "theorem", tier = "heavy", task_id = task.id, "theorem claimed"
@@ -605,18 +909,78 @@ async fn drain_theorem(
         summary_b,
         formulas,
     };
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("bridge+formula context loaded"),
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "llm_call",
+        None,
+        Some("theorem prove"),
+        None,
+        None,
+    )
+    .await;
 
     match theorem.prove(&input).await {
         Ok(note) => {
             if let Err(e) = vault.write_theorem(&note).await {
                 error!(error = %e, "theorem vault write failed");
+                emit_research_event(
+                    db,
+                    ctx,
+                    "failed",
+                    4,
+                    "failed",
+                    None,
+                    Some(&e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
                 db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
             } else {
+                emit_research_event(
+                    db,
+                    ctx,
+                    "finalized",
+                    4,
+                    "finalize",
+                    None,
+                    Some("theorem written"),
+                    None,
+                    None,
+                )
+                .await;
                 db.finish_agent_task(task.id).await?;
             }
         }
         Err(e) => {
             error!(error = %e, "theorem failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -635,6 +999,35 @@ async fn drain_derivation(
     else {
         return Ok(());
     };
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "derivation",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("derivation task parsed"),
+        None,
+        None,
+    )
+    .await;
     info!(
         target: "agent.spawn",
         role = "derivation", tier = "heavy", task_id = task.id, "derivation claimed"
@@ -649,7 +1042,11 @@ async fn drain_derivation(
     let notes: Vec<String> = payload
         .get("notes")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if seed_topic.is_empty() || notes.is_empty() {
         db.fail_agent_task(task.id, "derivation: missing payload fields")
@@ -675,22 +1072,94 @@ async fn drain_derivation(
         })
         .collect();
     if formulas.is_empty() {
+        emit_research_event(
+            db,
+            ctx,
+            "failed",
+            2,
+            "failed",
+            None,
+            Some("no formulas resolvable"),
+            None,
+            None,
+        )
+        .await;
         db.fail_agent_task(task.id, "derivation: no formulas resolvable")
             .await?;
         return Ok(());
     }
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("formulas loaded"),
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "llm_call",
+        None,
+        Some("derivation chain"),
+        None,
+        None,
+    )
+    .await;
 
     match derivation.chain(&seed_topic, &formulas).await {
         Ok(chain) => {
             if let Err(e) = vault.write_derivation(&chain).await {
                 error!(error = %e, "derivation vault write failed");
+                emit_research_event(
+                    db,
+                    ctx,
+                    "failed",
+                    4,
+                    "failed",
+                    None,
+                    Some(&e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
                 db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
             } else {
+                emit_research_event(
+                    db,
+                    ctx,
+                    "finalized",
+                    4,
+                    "finalize",
+                    None,
+                    Some("derivation written"),
+                    None,
+                    None,
+                )
+                .await;
                 db.finish_agent_task(task.id).await?;
             }
         }
         Err(e) => {
             error!(error = %e, "derivation failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -703,9 +1172,41 @@ async fn drain_report(
     report: &ReportWriterAgent,
 ) -> crate::error::AppResult<()> {
     let batch_id = Uuid::new_v4().to_string();
-    let Some(task) = db.claim_agent_task(AgentTaskKind::Report, &batch_id).await? else {
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Report, &batch_id)
+        .await?
+    else {
         return Ok(());
     };
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "report",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("report task parsed"),
+        None,
+        None,
+    )
+    .await;
     info!(
         target: "agent.spawn",
         role = "report", tier = "heavy", task_id = task.id, "report claimed"
@@ -726,21 +1227,93 @@ async fn drain_report(
     let inputs = gather_report_inputs(vault).await;
     if inputs.is_empty() {
         // Nothing produced in the window — finish silently without an LLM call.
+        emit_research_event(
+            db,
+            ctx,
+            "finalized",
+            2,
+            "finalize",
+            None,
+            Some("no inputs in time window"),
+            None,
+            None,
+        )
+        .await;
         db.finish_agent_task(task.id).await?;
         return Ok(());
     }
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("report inputs loaded"),
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "llm_call",
+        None,
+        Some("report write"),
+        None,
+        None,
+    )
+    .await;
 
     match report.write(&date, &inputs).await {
         Ok(r) => {
             if let Err(e) = vault.write_report(&r).await {
                 error!(error = %e, "report vault write failed");
+                emit_research_event(
+                    db,
+                    ctx,
+                    "failed",
+                    4,
+                    "failed",
+                    None,
+                    Some(&e.to_string()),
+                    None,
+                    None,
+                )
+                .await;
                 db.fail_agent_task(task.id, &format!("vault: {e}")).await?;
             } else {
+                emit_research_event(
+                    db,
+                    ctx,
+                    "finalized",
+                    4,
+                    "finalize",
+                    None,
+                    Some("report written"),
+                    None,
+                    None,
+                )
+                .await;
                 db.finish_agent_task(task.id).await?;
             }
         }
         Err(e) => {
             error!(error = %e, "report failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -758,6 +1331,35 @@ async fn drain_formula_extract(
     else {
         return Ok(());
     };
+    let request_id = task.id.to_string();
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "formula_extractor",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        None,
+        Some("formula task parsed"),
+        None,
+        None,
+    )
+    .await;
     info!(
         target: "agent.spawn",
         role = "formula_extractor",
@@ -767,7 +1369,10 @@ async fn drain_formula_extract(
     );
     let payload: serde_json::Value =
         serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
-    let chunk_id = payload.get("chunk_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let chunk_id = payload
+        .get("chunk_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let source_name = payload
         .get("source_name")
         .and_then(|v| v.as_str())
@@ -779,10 +1384,46 @@ async fn drain_formula_extract(
         return Ok(());
     }
     let Some(content) = db.get_chunk_content(chunk_id).await? else {
+        emit_research_event(
+            db,
+            ctx,
+            "failed",
+            2,
+            "failed",
+            None,
+            Some("chunk not found"),
+            None,
+            None,
+        )
+        .await;
         db.fail_agent_task(task.id, "formula_extract: chunk not found")
             .await?;
         return Ok(());
     };
+    emit_research_event(
+        db,
+        ctx,
+        "skill_context_loaded",
+        2,
+        "context",
+        None,
+        Some("chunk loaded"),
+        None,
+        None,
+    )
+    .await;
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "llm_call",
+        None,
+        Some("formula extract"),
+        None,
+        None,
+    )
+    .await;
 
     match agent.extract(&content).await {
         Ok(out) => {
@@ -813,18 +1454,36 @@ async fn drain_formula_extract(
                     Err(e) => warn!(error = %e, "upsert_formula failed"),
                 }
             }
-            let _ = db
-                .increment_usage(UsageKind::Harvester, 0, 0)
-                .await;
-            info!(
-                chunk_id,
-                new_formulas = inserted_n,
-                "formula_extract done"
-            );
+            let _ = db.increment_usage(UsageKind::Harvester, 0, 0).await;
+            info!(chunk_id, new_formulas = inserted_n, "formula_extract done");
+            emit_research_event(
+                db,
+                ctx,
+                "finalized",
+                4,
+                "finalize",
+                None,
+                Some("formulas persisted"),
+                None,
+                Some(&note_rel_path),
+            )
+            .await;
             db.finish_agent_task(task.id).await?;
         }
         Err(e) => {
             error!(error = %e, chunk_id, "formula_extract failed");
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
             db.fail_agent_task(task.id, &e.to_string()).await?;
         }
     }
@@ -844,10 +1503,7 @@ async fn filter_formulas_for_topics(
     let mut allowed: std::collections::HashSet<String> = Default::default();
     let re = regex::Regex::new(r"\(([^)]+\.md)\)").unwrap();
     for tag in topic_tags {
-        let topic_file = vault
-            .vault_dir()
-            .join("Topics")
-            .join(format!("{tag}.md"));
+        let topic_file = vault.vault_dir().join("Topics").join(format!("{tag}.md"));
         let content = tokio::fs::read_to_string(&topic_file)
             .await
             .unwrap_or_default();
@@ -954,11 +1610,15 @@ fn parse_yaml_string(content: &str, key: &str) -> Option<String> {
     let mut in_fm = false;
     for line in content.lines() {
         if line.trim() == "---" {
-            if in_fm { return None; }
+            if in_fm {
+                return None;
+            }
             in_fm = true;
             continue;
         }
-        if !in_fm { continue; }
+        if !in_fm {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
             let v = rest.trim().trim_matches('"').to_string();
             return Some(v);
@@ -973,8 +1633,14 @@ fn content_body(content: &str) -> String {
     let mut in_fm = false;
     for line in content.lines() {
         if line.trim() == "---" {
-            if !in_fm { in_fm = true; continue; }
-            if !seen_fm_close { seen_fm_close = true; continue; }
+            if !in_fm {
+                in_fm = true;
+                continue;
+            }
+            if !seen_fm_close {
+                seen_fm_close = true;
+                continue;
+            }
         }
         if seen_fm_close {
             out.push_str(line);
@@ -983,7 +1649,9 @@ fn content_body(content: &str) -> String {
     }
     if out.len() > 4000 {
         let mut cut = 4000;
-        while !out.is_char_boundary(cut) && cut > 0 { cut -= 1; }
+        while !out.is_char_boundary(cut) && cut > 0 {
+            cut -= 1;
+        }
         out.truncate(cut);
         out.push_str("\n…");
     }
