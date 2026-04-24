@@ -17,7 +17,9 @@ use crate::{
         formula_extractor::FormulaExtractorAgent,
         harvester::FormulaHarvesterAgent,
         report::{ReportInput, ReportWriterAgent},
+        research::ResearchSolverAgent,
         retrier::ErrorRetrierAgent,
+        search::LiteratureSearchAgent,
         theorem::{TheoremInput, TheoremProverAgent},
         KnowledgeGraphAgent,
     },
@@ -402,6 +404,29 @@ impl Orchestrator {
                 ticker.tick().await;
                 if let Err(e) = scheduler.tick().await {
                     warn!(error = %e, "scheduler tick failed");
+                }
+            }
+        });
+    }
+
+    /// Independent ad-hoc research loop fed by API-submitted `Research`
+    /// tasks. Uses vault context + bounded Tavily calls.
+    pub fn spawn_research_requests(
+        &self,
+        solver: ResearchSolverAgent,
+        search: LiteratureSearchAgent,
+    ) {
+        let db = self.db.clone();
+        let vault = self.vault.clone();
+        let interval = self.cfg.research_interval;
+        tokio::spawn(async move {
+            time::sleep(Duration::from_secs(8)).await;
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = drain_research(&db, &vault, &solver, &search).await {
+                    warn!(error = %e, "research request drain failed");
                 }
             }
         });
@@ -831,6 +856,103 @@ async fn drain_formula_extract(
     Ok(())
 }
 
+async fn drain_research(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    solver: &ResearchSolverAgent,
+    search: &LiteratureSearchAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db.claim_agent_task(AgentTaskKind::Research, &batch_id).await? else {
+        return Ok(());
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let query = payload
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if query.is_empty() {
+        db.fail_agent_task(task.id, "research: empty query").await?;
+        return Ok(());
+    }
+    let max_web_queries = payload
+        .get("max_web_queries")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2)
+        .clamp(1, 4);
+
+    let context = gather_research_context(vault, &query).await;
+    let mut web_chunks = Vec::new();
+    for i in 0..max_web_queries {
+        let q = if i == 0 {
+            query.clone()
+        } else {
+            format!("{query} derivation evidence {i}")
+        };
+        let r = search.search(&q).await?;
+        if r.used_budget {
+            let lines = r
+                .hits
+                .iter()
+                .map(|h| format!("- {} ({}) :: {}", h.title, h.url, h.snippet))
+                .collect::<Vec<_>>()
+                .join("\n");
+            web_chunks.push(format!("## Query: {q}\n{lines}"));
+        }
+    }
+    let web = web_chunks.join("\n\n");
+
+    match solver.solve(&query, &context, &web).await {
+        Ok(out) => {
+            if let Err(e) = vault.write_research(&out).await {
+                db.fail_agent_task(task.id, &format!("research vault: {e}"))
+                    .await?;
+            } else {
+                db.finish_agent_task(task.id).await?;
+            }
+        }
+        Err(e) => {
+            db.fail_agent_task(task.id, &format!("research solve: {e}"))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn gather_research_context(vault: &Arc<VaultWriter>, query: &str) -> String {
+    let q_tokens = query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut picked = Vec::new();
+    let mut rd = match tokio::fs::read_dir(vault.vault_dir().join("Topics")).await {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let content = match tokio::fs::read_to_string(&p).await {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lower = content.to_lowercase();
+        if q_tokens.iter().any(|t| lower.contains(t)) {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+            picked.push(format!("## {name}\n{}", truncate_for_prompt(&content, 1400)));
+        }
+        if picked.len() >= 5 {
+            break;
+        }
+    }
+    picked.join("\n\n")
+}
+
 async fn summarise_topic_by_tag(vault: &Arc<VaultWriter>, tag: &str) -> String {
     let abs = vault.vault_dir().join("Topics").join(format!("{tag}.md"));
     tokio::fs::read_to_string(&abs).await.unwrap_or_default()
@@ -987,5 +1109,14 @@ fn content_body(content: &str) -> String {
         out.truncate(cut);
         out.push_str("\n…");
     }
+    out
+}
+
+fn truncate_for_prompt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out = s.chars().take(max).collect::<String>();
+    out.push('…');
     out
 }

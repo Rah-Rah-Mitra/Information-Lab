@@ -3,6 +3,7 @@
 //! binary entry point lives in `src/main.rs`.
 
 pub mod agents;
+pub mod api;
 pub mod config;
 pub mod db;
 pub mod error;
