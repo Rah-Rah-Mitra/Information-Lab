@@ -91,6 +91,8 @@ Information Lab is an edge-native autonomous pipeline that converts PDFs into an
   - `POST /research/request`
   - `GET /research/{id}`
   - `GET /research/{id}/events`
+  - `GET /monitor/executions?limit=20`
+  - `GET /monitor/executions/{id}`
 - Optional OTLP tracing via `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
 ## High-level architecture
