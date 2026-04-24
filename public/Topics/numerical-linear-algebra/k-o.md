@@ -1,24 +1,19 @@
 ---
 type: index
-index_kind: source
-title: "LA"
-created: 2026-04-24T09:16:23.860791700+00:00
+index_kind: topic
+title: "numerical-linear-algebra"
+created: 2026-04-24T09:41:44.011124500+00:00
 ---
 
-# LA (bucket `k-o`)
+# numerical-linear-algebra (bucket `k-o`)
 
-Notes generated from **LA**. Scan summaries; open a note when you need its full derivation.
+Notes tagged **#numerical-linear-algebra**, aggregated across every source in this library. This is the cross-textbook view of the topic.
 
-- [[Matrix Theory and Partial Differential Equations]] — This note covers fundamental concepts in matrix theory, including eigenvalue characterization, nonnegative matrices, and projectors, alongside an introduction to partial differential equations. It pr… · #linear-algebra #matrix-theory #partial-differential-equations (Generated/LA/matrix-theory-and-partial-differential-equations-20260424-082843.md)
-- [[Numerical Discretization Methods for Partial Differential Equations]] — This note covers the fundamental discretization techniques used to solve partial differential equations, including finite difference, finite element, and finite volume methods. It explains how contin… · #numerical-analysis #partial-differential-equations #computational-fluid-dynamics (Generated/LA/numerical-discretization-methods-for-partial-differential-equations-20260424-082958.md)
+- [[Newton's Method with Hessian Modification]] — Hessian modification techniques are used to ensure the Newton direction is a descent direction by making the resulting coefficient matrix positive definite. These methods include modified Cholesky fa… · #optimization-theory #numerical-linear-algebra #nonlinear-optimization (Generated/OR/newton-s-method-with-hessian-modification-20260424-072149.md)
 - [[Krylov Subspace Projection Methods]] — Krylov subspace methods are iterative techniques for solving large, sparse linear systems by projecting the problem onto a subspace. These methods include GMRES, Conjugate Gradient, and Lanczos algor… · #linear-algebra #iterative-methods #krylov-subspace (Generated/LA/krylov-subspace-projection-methods-20260424-083810.md)
 - [[Krylov Subspace Methods and Chebyshev Polynomials]] — This note explores the convergence properties and algorithmic variations of Krylov subspace methods, including GMRES, FOM, and Conjugate Gradient. It highlights the role of Chebyshev polynomials in a… · #linear-algebra #krylov-subspace-methods #chebyshev-polynomials (Generated/LA/krylov-subspace-methods-and-chebyshev-polynomials-20260424-083839.md)
-- [[Linear Algebra Fundamentals and Sparse Matrix Storage]] — This note covers the foundational concepts of complex vector spaces, matrix properties, and various sparse matrix storage formats. It explains the mathematical basis for iterative methods and the str… · #linear-algebra #sparse-matrices #numerical-analysis (Generated/LA/linear-algebra-fundamentals-and-sparse-matrix-storage-20260424-083902.md)
 - [[Krylov Subspace Projection Methods]] — Krylov subspace methods are iterative solvers for large linear systems that use projection techniques to find approximate solutions. These methods include FOM, GMRES, and Lanczos, each differing in t… · #linear-algebra #iterative-solvers #krylov-subspace-methods (Generated/LA/krylov-subspace-projection-methods-20260424-083926.md)
 - [[Krylov Subspace Methods and Sparse Matrix Storage]] — Krylov subspace methods are iterative solvers used for large, sparse linear systems. They rely on efficient matrix-vector products and are often enhanced by preconditioning to accelerate convergence.… · #linear-algebra #numerical-linear-algebra #sparse-matrices (Generated/LA/krylov-subspace-methods-and-sparse-matrix-storage-20260424-091303.md)
-- [[Least Squares Problems and Numerical Stability]] — Least squares problems aim to minimize the norm of the residual in linear systems, often solved via normal equations, QR factorization, or SVD. The accuracy of these solutions depends heavily on the … · #linear-algebra #numerical-analysis #least-squares (Generated/LA/least-squares-problems-and-numerical-stability-20260424-091731.md)
 - [[Numerical Stability and Backward Error Analysis]] — Numerical stability characterizes how rounding errors in floating point arithmetic affect the accuracy of computed results. This note distinguishes between stability and backward stability, explainin… · #numerical-linear-algebra #numerical-analysis #floating-point-arithmetic (Generated/LA/numerical-stability-and-backward-error-analysis-20260424-091756.md)
 - [[Multicoloring and Incomplete Factorization Preconditioners]] — Multicoloring and incomplete factorization techniques are used to reorder sparse matrices to enhance parallelism and convergence in iterative solvers. These methods exploit the adjacency graph of a t… · #numerical-linear-algebra #sparse-matrices #preconditioning (Generated/LA/multicoloring-and-incomplete-factorization-preconditioners-20260424-092024.md)
 - [[Krylov Subspace Iterative Methods]] — Krylov subspace methods like Arnoldi and Lanczos iterations are used to find eigenvalues and solve linear systems. Their convergence is fundamentally linked to polynomial approximation problems on th… · #linear-algebra #iterative-methods #krylov-subspace (Generated/LA/krylov-subspace-iterative-methods-20260424-092522.md)
-- [[Lanczos Iteration and Conjugate Gradients]] — The Lanczos iteration and Conjugate Gradients (CG) are Krylov subspace methods used for eigenvalue problems and linear systems, respectively. They leverage three-term recurrence relations to achieve … · #linear-algebra #iterative-methods #krylov-subspace (Generated/LA/lanczos-iteration-and-conjugate-gradients-20260424-093232.md)
-- [[Numerical Stability and Iterative Methods]] — This note covers the fundamental concepts of numerical stability, backward error analysis, and the evolution of iterative methods for large-scale linear systems. It highlights the relationship betwee… · #numerical-analysis #linear-algebra #stability-analysis (Generated/LA/numerical-stability-and-iterative-methods-20260424-094904.md)

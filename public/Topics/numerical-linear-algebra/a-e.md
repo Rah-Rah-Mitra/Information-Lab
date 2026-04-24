@@ -1,16 +1,15 @@
 ---
 type: index
-index_kind: source
-title: "LA"
-created: 2026-04-24T09:16:23.855023600+00:00
+index_kind: topic
+title: "numerical-linear-algebra"
+created: 2026-04-24T09:41:44.004737100+00:00
 ---
 
-# LA (bucket `a-e`)
+# numerical-linear-algebra (bucket `a-e`)
 
-Notes generated from **LA**. Scan summaries; open a note when you need its full derivation.
+Notes tagged **#numerical-linear-algebra**, aggregated across every source in this library. This is the cross-textbook view of the topic.
 
+- [[Conjugate Gradient Method and Preconditioning]] — The Conjugate Gradient (CG) method is an iterative algorithm for solving linear systems and minimizing quadratic forms. It achieves rapid convergence by using conjugate search directions rather than … · #optimization #numerical-linear-algebra #conjugate-gradient (Generated/OR/conjugate-gradient-method-and-preconditioning-20260424-072635.md)
 - [[Approximate Inverse Preconditioning Techniques]] — Approximate inverse techniques seek to find a sparse matrix that minimizes a residual norm, providing a robust alternative to incomplete LU factorizations. These methods include global and column-ori… · #linear-algebra #numerical-linear-algebra #preconditioning (Generated/LA/approximate-inverse-preconditioning-techniques-20260424-090916.md)
-- [[Domain Decomposition and Schur Complement]] — Domain decomposition methods partition a global problem into smaller subproblems to exploit parallelism and simplify geometry. The Schur complement approach uses block-Gaussian elimination to solve f… · #linear-algebra #domain-decomposition #numerical-methods (Generated/LA/domain-decomposition-and-schur-complement-20260424-091140.md)
-- [[Eigenvalue Problems and Matrix Factorizations]] — This note explores the fundamental properties of eigenvalues and eigenvectors, including multiplicities and stability. It details various matrix factorizations like Schur, diagonalization, and unitar… · #linear-algebra #matrix-factorization #eigenvalue-problems (Generated/LA/eigenvalue-problems-and-matrix-factorizations-20260424-092136.md)
 - [[Eigenvalue Algorithms and Iterative Methods]] — This note covers fundamental iterative methods for computing eigenvalues and eigenvectors, including power iteration, inverse iteration, and the QR algorithm. These methods are essential for large-sc… · #numerical-linear-algebra #eigenvalue-algorithms #iterative-methods (Generated/LA/eigenvalue-algorithms-and-iterative-methods-20260424-092200.md)
 - [[Convergence and Preconditioning of Iterative Methods]] — This note explores the convergence rates of the Conjugate Gradient (CG) method and its variants, including biorthogonalization methods like BCG. It explains how the condition number and eigenvalue di… · #numerical-linear-algebra #iterative-methods #conjugate-gradient (Generated/LA/convergence-and-preconditioning-of-iterative-methods-20260424-093726.md)

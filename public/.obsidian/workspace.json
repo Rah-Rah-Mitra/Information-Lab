@@ -178,6 +178,12 @@
   },
   "active": "5cb606131813081b",
   "lastOpenFiles": [
+    "Topics/numerical-linear-algebra/p-t.md",
+    "Topics/numerical-linear-algebra/k-o.md",
+    "Topics/numerical-linear-algebra/a-e.md",
+    "Topics/numerical-linear-algebra/f-j.md",
+    "Topics/numerical-linear-algebra",
+    "Generated/LA/preconditioning-in-iterative-methods-20260424-094143.md",
     "Generated/CV/computer-vision-bibliography-and-research-trends-20260419-014054.md",
     "Generated/CV/machine-learning-paradigms-and-techniques-20260419-012940.md",
     "Generated/GIS/foundations-of-geographic-information-systems-20260419-012027.md",
@@ -199,11 +205,6 @@
     "Topics/exploration.md",
     "Topics/pomdp.md",
     "Generated/CV/approximate-pomdp-and-exploration-techniques-20260419-020659.md",
-    "Topics/stochastic-systems.md",
-    "Topics/decision-processes.md",
-    "Topics/probabilistic-planning.md",
-    "Generated/CV/markov-decision-processes-and-pomdps-20260419-020632.md",
-    "Topics/fastslam.md",
     "Sources/CV",
     "Topics/computer-vision",
     "Generated/CV",
@@ -212,7 +213,6 @@
     "CV/Conformal geometry - Computational Algorithms and Engineering Applications.pdf",
     "CV/Probabilistic Robotics.pdf",
     "CV/Polygon Mesh Processing.pdf",
-    "CV/Multi-View Stereo - A Tutorial.pdf",
-    "Sources/D_"
+    "CV/Multi-View Stereo - A Tutorial.pdf"
   ]
 }

@@ -15,6 +15,12 @@ Two-axis navigation. **Sources** lists every textbook ingested; **Topics** is th
 - [[OR]] (Sources/OR.md)
 ## Topics
 
+- [[arnoldi-iteration]] — #arnoldi-iteration (Topics/arnoldi-iteration.md)
+- [[krylov-subspaces]] — #krylov-subspaces (Topics/krylov-subspaces.md)
+- [[eigenvalue-algorithms]] — #eigenvalue-algorithms (Topics/eigenvalue-algorithms.md)
+- [[eigenvalue-problems]] — #eigenvalue-problems (Topics/eigenvalue-problems.md)
+- [[lu-factorization]] — #lu-factorization (Topics/lu-factorization.md)
+- [[gaussian-elimination]] — #gaussian-elimination (Topics/gaussian-elimination.md)
 - [[stability-analysis]] — #stability-analysis (Topics/stability-analysis.md)
 - [[floating-point-arithmetic]] — #floating-point-arithmetic (Topics/floating-point-arithmetic.md)
 - [[floating-point]] — #floating-point (Topics/floating-point.md)
