@@ -136,6 +136,7 @@ If API bind is valid and available, the service exposes:
 - `GET /research/{id}/events`
 
 Default bind is `127.0.0.1:8090` unless `RESEARCH_API_BIND` overrides it.
+Internal clients (like the Telegram bot) use `RESEARCH_REQUEST_ENDPOINT` (default `http://127.0.0.1:8090/research/request`).
 
 Example request:
 
@@ -148,6 +149,22 @@ curl -sS -X POST http://127.0.0.1:8090/research/request \
     "skills_scope": ["derivation_chain", "theorem_prover"]
   }'
 ```
+
+
+### 7.2.1 Telegram bot interface (optional)
+
+Set `TELEGRAM_BOT_TOKEN` to enable an integrated bot front-end for research requests and vault browsing.
+
+At startup, the service prints a one-time auth code in terminal logs. In Telegram:
+
+1. Send `/start` to your bot.
+2. Send `/auth <CODE>` (replace `<CODE>` with the terminal code).
+3. Use commands:
+   - `/library [path]` — list folders/files under the vault root
+   - `/view <path>` — show file contents (first 60 lines)
+   - `/research <question>` — enqueue a research request (same backend as the HTTP endpoint)
+
+Telegram endpoint base is configurable via `TELEGRAM_API_BASE` and defaults to `https://api.telegram.org`.
 
 ### 7.3 Optional OpenTelemetry export
 

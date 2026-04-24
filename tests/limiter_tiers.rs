@@ -61,6 +61,9 @@ fn test_cfg() -> Config {
         scheduler_interval: Duration::from_secs(60),
         research_interval: Duration::from_secs(30),
         research_api_bind: "127.0.0.1:0".into(),
+        research_request_endpoint: "http://127.0.0.1:8090/research/request".into(),
+        telegram_bot_token: None,
+        telegram_api_base: "https://api.telegram.org".into(),
         thinking_redaction_policy: "redact".into(),
         thinking_max_bytes: 512,
 
