@@ -14,11 +14,52 @@ Information Lab is an edge-native autonomous pipeline that converts PDFs into an
 
 ## Quick start
 
-```bash
-cargo run
-```
+### 5-minute quick start
 
-Then drop PDFs into your configured `WATCH_DIR` and inspect output in `VAULT_DIR`.
+1. **Prerequisites**
+   - Rust toolchain installed (`rustup`, `cargo`, and a current stable compiler).
+   - SQLite available on your system (the pipeline uses SQLite with WAL mode).
+   - Optional: [Obsidian](https://obsidian.md/) for browsing the generated vault notes.
+
+2. **Configure environment**
+
+   Set the minimum required runtime directories before starting the service:
+
+   ```bash
+   export WATCH_DIR=/absolute/path/to/incoming-pdfs
+   export VAULT_DIR=/absolute/path/to/obsidian-vault
+   ```
+
+   `WATCH_DIR` is where you drop source PDFs. `VAULT_DIR` is where notes/artifacts are written.
+
+3. **Start the pipeline**
+
+   ```bash
+   cargo run
+   # or
+   cargo run --release
+   ```
+
+4. **Try it now**
+   - Create an input directory if it does not exist and ensure `WATCH_DIR` points to it.
+   - Place one sample PDF inside `WATCH_DIR`.
+   - Wait for processing, then inspect `VAULT_DIR` for generated notes and artifacts.
+
+5. **Verify pipeline is running**
+   - Confirm notes/artifacts appear in your vault (`VAULT_DIR`).
+   - Confirm `SYSTEM_STATUS.md` is created and updates over time.
+   - Optionally verify research endpoints:
+     - `POST /research/request`
+     - `GET /research/{id}`
+     - `GET /research/{id}/events`
+
+### Troubleshooting (first run)
+
+| Symptom | Likely cause | What to do |
+| --- | --- | --- |
+| App exits on startup with config errors | Missing required env vars | Set `WATCH_DIR` and `VAULT_DIR`, then restart `cargo run`. |
+| Pipeline starts but nothing happens | `WATCH_DIR` is empty or wrong path | Verify path exists, drop a PDF into `WATCH_DIR`, and watch logs. |
+| No notes/artifacts in vault | `VAULT_DIR` is incorrect/unwritable or processing failed | Check `VAULT_DIR` path/permissions and inspect logs + `SYSTEM_STATUS.md`. |
 
 ## Runtime feature set
 
@@ -56,14 +97,49 @@ Then drop PDFs into your configured `WATCH_DIR` and inspect output in `VAULT_DIR
 
 ```mermaid
 flowchart LR
-    PDF[Watched PDFs] --> INGEST[Ingest + Chunk]
-    INGEST --> DB[(SQLite)]
-    DB --> ORCH[Orchestrator + Scheduler]
-    ORCH --> AGENTS[Agent Fleet]
-    AGENTS --> VAULT[Vault Writer]
-    VAULT --> OBS[Obsidian Notes + Indexes + Artifacts]
-    ORCH --> API[Research API + Events]
+    PDF[Watched PDFs] --> INGEST[PDF Ingest + Chunking]
+    INGEST --> DB[(SQLite task state + chunks + indexes)]
+    DB --> ORCH[orchestrator]
+    API[Research API + timeline events] --> ORCH
+    ORCH --> FLEET[agent fleet]
+    FLEET --> VAULT[Vault writer]
+    VAULT --> OBS[Obsidian vault notes + indexes + artifacts]
     ORCH --> STATUS[SYSTEM_STATUS.md]
+    ORCH --> RTASKS[Research tasks]
+    RTASKS --> DB
+```
+
+```mermaid
+flowchart TD
+    PDF[Watched PDFs] --> INGEST[PDF ingest/chunking]
+    INGEST --> CK1[(SQLite task state checkpoint: ingest/chunks)]
+    CK1 --> ORCH[orchestrator]
+    API[API-triggered ad-hoc research path] --> ORCH
+
+    ORCH --> LIGHT[Light tier]
+    LIGHT --> EXTRACT[Extraction lane]
+    LIGHT --> FORMULA[Formula lane]
+    EXTRACT --> CK2[(SQLite task state checkpoint: extraction)]
+    FORMULA --> CK3[(SQLite task state checkpoint: formulas)]
+
+    CK2 --> HEAVY[Heavy tier]
+    CK3 --> HEAVY
+    ORCH --> HEAVY
+    HEAVY --> CURATOR[Curator lane]
+    HEAVY --> BRIDGE[Bridge lane]
+    HEAVY --> THEOREM[Theorem lane]
+    HEAVY --> DERIVATION[Derivation lane]
+    HEAVY --> REPORT[Report lane]
+
+    CURATOR --> CK4[(SQLite task state checkpoint: Research tasks)]
+    BRIDGE --> CK4
+    THEOREM --> CK4
+    DERIVATION --> CK4
+    REPORT --> CK4
+
+    CK4 --> VAULT[Vault write]
+    VAULT --> INDEX[Index updates]
+    INDEX --> STATUS[SYSTEM_STATUS.md]
 ```
 
 ## Documentation
