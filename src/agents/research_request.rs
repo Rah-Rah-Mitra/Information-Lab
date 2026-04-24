@@ -38,6 +38,8 @@ pub struct ResearchContext {
     pub skills_scope: Vec<String>,
     pub topic_context: Vec<String>,
     pub formula_context: Vec<String>,
+    pub iteration_index: u8,
+    pub prior_report: Option<String>,
 }
 
 fn research_result_schema() -> Value {
@@ -79,8 +81,9 @@ impl ResearchRequestAgent {
         let _permit = self.limiter.admit(Role::Report).await?;
 
         let prompt = format!(
-            "{RESEARCH_REQUEST_SKILL}\n\n---\n\n# Problem\n{problem}\n\n# Max iterations\n{iters}\n\n# Skills scope\n{scope}\n\n# Topic context\n{topics}\n\n# Formula context\n{formulas}",
+            "{RESEARCH_REQUEST_SKILL}\n\n---\n\n# Problem\n{problem}\n\n# Iteration\n{iter}/{iters}\n\n# Skills scope\n{scope}\n\n# Topic context\n{topics}\n\n# Formula context\n{formulas}\n\n# Prior draft\n{prior}",
             problem = ctx.problem,
+            iter = ctx.iteration_index,
             iters = ctx.max_iterations,
             scope = if ctx.skills_scope.is_empty() {
                 "(none)".to_string()
@@ -96,7 +99,8 @@ impl ResearchRequestAgent {
                 "(none)".to_string()
             } else {
                 ctx.formula_context.join("\n")
-            }
+            },
+            prior = ctx.prior_report.as_deref().unwrap_or("(none)")
         );
 
         let messages = vec![ChatMessage::user().content(prompt.clone()).build()];

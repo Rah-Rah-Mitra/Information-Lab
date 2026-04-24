@@ -9,6 +9,7 @@ use std::{
 
 use reqwest::StatusCode;
 use serde::Serialize;
+use teloxide::net::Download;
 use teloxide::{prelude::*, requests::Requester};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
@@ -20,6 +21,7 @@ struct TelegramState {
     auth_code: Arc<str>,
     authenticated_chats: Arc<Mutex<HashSet<i64>>>,
     vault_dir: PathBuf,
+    watch_dir: PathBuf,
     research_request_endpoint: String,
     http: reqwest::Client,
 }
@@ -53,6 +55,7 @@ pub fn spawn(cfg: &Config, _db: Db) {
         auth_code: Arc::<str>::from(auth_code),
         authenticated_chats: Arc::new(Mutex::new(HashSet::new())),
         vault_dir: cfg.vault_dir.clone(),
+        watch_dir: cfg.watch_dir.clone(),
         research_request_endpoint: cfg.research_request_endpoint.clone(),
         http: reqwest::Client::new(),
     };
@@ -81,6 +84,34 @@ pub fn spawn(cfg: &Config, _db: Db) {
 }
 
 async fn handle_message(bot: Bot, msg: Message, state: TelegramState) {
+    if let Some(doc) = msg.document() {
+        if !is_authenticated(msg.chat.id.0, &state).await {
+            let _ = bot
+                .send_message(
+                    msg.chat.id,
+                    "Not authenticated. Use /auth <CODE> from terminal output.",
+                )
+                .await;
+            return;
+        }
+        match save_uploaded_document(&bot, &msg, doc, &state).await {
+            Ok(path) => {
+                let _ = bot
+                    .send_message(
+                        msg.chat.id,
+                        format!("Uploaded and queued from: {}", path.display()),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                let _ = bot
+                    .send_message(msg.chat.id, format!("upload error: {e}"))
+                    .await;
+            }
+        }
+        return;
+    }
+
     let Some(text) = msg.text() else {
         return;
     };
@@ -89,7 +120,7 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) {
     let cmd = text.trim();
 
     if cmd.starts_with("/start") {
-        let body = "Information Lab bot ready.\n\nAuthenticate with /auth <CODE>.\nAfter auth: /library [path], /view <path>, /research <question>.";
+        let body = "Information Lab bot ready.\n\nAuthenticate with /auth <CODE>.\nAfter auth: /library [path], /view <path>, /research <question>, /continue <question>. You can also upload a PDF directly.";
         let _ = bot.send_message(chat_id, body).await;
         return;
     }
@@ -103,7 +134,7 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) {
             let _ = bot
                 .send_message(
                     chat_id,
-                    "Authenticated. You can now use /library, /view, and /research.",
+                    "Authenticated. You can now use /library, /view, /research, /continue, and upload PDFs.",
                 )
                 .await;
         } else {
@@ -150,7 +181,7 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) {
     }
 
     if let Some(problem) = cmd.strip_prefix("/research ") {
-        match enqueue_research(problem.trim(), &msg, &state).await {
+        match enqueue_research(problem.trim(), &msg, &state, false).await {
             Ok(task_id) => {
                 let _ = bot
                     .send_message(chat_id, format!("Queued research task #{task_id}."))
@@ -166,10 +197,33 @@ async fn handle_message(bot: Bot, msg: Message, state: TelegramState) {
         return;
     }
 
+    if let Some(problem) = cmd.strip_prefix("/continue ") {
+        match enqueue_research(problem.trim(), &msg, &state, true).await {
+            Ok(task_id) => {
+                let _ = bot
+                    .send_message(
+                        chat_id,
+                        format!("Queued continuation research task #{task_id}."),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                error!(error = %e, "telegram continuation enqueue failed");
+                let _ = bot
+                    .send_message(
+                        chat_id,
+                        "Failed to enqueue continuation; check service logs.",
+                    )
+                    .await;
+            }
+        }
+        return;
+    }
+
     let _ = bot
         .send_message(
             chat_id,
-            "Unknown command. Use /library [path], /view <path>, or /research <question>.",
+            "Unknown command. Use /library [path], /view <path>, /research <question>, /continue <question>, or upload a PDF.",
         )
         .await;
 }
@@ -182,13 +236,19 @@ async fn enqueue_research(
     problem: &str,
     msg: &Message,
     state: &TelegramState,
+    continuation: bool,
 ) -> anyhow::Result<i64> {
     if problem.is_empty() {
         anyhow::bail!("problem must be non-empty")
     }
+    let normalized_problem = if continuation {
+        format!("Continue and expand the ongoing research with new rigor and detail:\n{problem}")
+    } else {
+        problem.to_string()
+    };
     let body = ResearchRequestBody {
-        problem: problem.to_string(),
-        max_iterations: Some(2),
+        problem: normalized_problem,
+        max_iterations: Some(if continuation { 12 } else { 8 }),
         skills_scope: Vec::new(),
         telegram_chat_id: Some(msg.chat.id.0.to_string()),
         telegram_message_id: Some(i64::from(msg.id.0)),
@@ -213,6 +273,25 @@ async fn enqueue_research(
         .and_then(|v| v.as_i64())
         .ok_or_else(|| anyhow::anyhow!("missing task_id in response"))?;
     Ok(task_id)
+}
+
+async fn save_uploaded_document(
+    bot: &Bot,
+    msg: &Message,
+    doc: &teloxide::types::Document,
+    state: &TelegramState,
+) -> anyhow::Result<PathBuf> {
+    let file = bot.get_file(doc.file.id.clone()).await?;
+    let filename = doc
+        .file_name
+        .clone()
+        .unwrap_or_else(|| format!("telegram-{}.pdf", msg.id.0));
+    let target_dir = state.watch_dir.join("Telegram");
+    tokio::fs::create_dir_all(&target_dir).await?;
+    let target_path = target_dir.join(filename);
+    let mut dst = tokio::fs::File::create(&target_path).await?;
+    bot.download_file(&file.path, &mut dst).await?;
+    Ok(target_path)
 }
 
 async fn list_library(vault_dir: &Path, suffix: &str) -> anyhow::Result<String> {

@@ -164,7 +164,9 @@ At startup, the service prints a one-time auth code in terminal logs. In Telegra
 3. Use commands:
    - `/library [path]` — list folders/files under the vault root
    - `/view <path>` — show file contents (first 60 lines)
-   - `/research <question>` — enqueue a research request (same backend as the HTTP endpoint)
+   - `/research <question>` — enqueue a deep research request (defaults to multi-iteration execution)
+   - `/continue <question>` — enqueue an extended continuation run with more iterations
+   - Upload a PDF directly in chat — file is saved into `WATCH_DIR/Telegram/` for ingest
 
 Telegram endpoint base is configurable via `TELEGRAM_API_BASE` and defaults to `https://api.telegram.org`.
 
@@ -181,6 +183,7 @@ For each request:
 3. If insufficient coverage, request finalizes as `UNSOLVABLE_INSUFFICIENT_KNOWLEDGE` with a helpful artifact.
 4. Otherwise, iterative solve loop runs up to bounded iterations.
 5. Lifecycle events are queryable via `/research/{id}` and `/research/{id}/events`.
+6. For Telegram-originated requests, final report status and generated markdown artifact path are pushed back to chat.
 
 ## 9) Common operator playbook
 
