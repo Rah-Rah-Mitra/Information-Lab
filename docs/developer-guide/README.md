@@ -9,7 +9,7 @@ This guide covers system internals, extension points, and expected engineering p
 - `src/main.rs`: runtime bootstrap, model preflight, task loop wiring, graceful shutdown.
 - `src/orchestrator.rs`: ingest/reason/research/task-drain execution loops.
 - `src/scheduler.rs`: periodic task enqueue logic (curate/bridge/theorem/derivation/report).
-- `src/api.rs`: HTTP API (`/research/request`, `/research/{id}`, `/research/{id}/events`).
+- `src/api.rs`: HTTP API (`/research/request`, `/research/{id}`, `/research/{id}/events`, `/monitor/executions`, `/monitor/executions/{id}`).
 - `src/status.rs`: monitoring document writer (`SYSTEM_STATUS.md`).
 - `src/workflow.rs`: Sequential / Parallel / Loop workflow primitives.
 - `src/agents/*.rs`: role-specific agent implementations.

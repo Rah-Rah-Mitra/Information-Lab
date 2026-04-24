@@ -60,6 +60,8 @@ The runtime now supports externally-triggered research requests that are queued 
 
 - `GET /research/{id}` returns a summary envelope plus ordered lifecycle events.
 - `GET /research/{id}/events` returns raw lifecycle events only.
+- `GET /monitor/executions?limit=20` lists recent execution IDs with token totals and lifecycle flags.
+- `GET /monitor/executions/{id}` returns per-role/phase/model/tool execution patterns plus full events.
 
 ### Solvability gate
 
