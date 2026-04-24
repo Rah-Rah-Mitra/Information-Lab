@@ -6,13 +6,13 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
-use crate::db::{AgentEventRow, Db, ResearchSummary};
+use crate::db::{AgentEventRow, AgentTaskKind, Db, ResearchSummary};
 
 #[derive(Clone)]
 struct ApiState {
@@ -30,6 +30,7 @@ pub fn spawn(db: Db, bind: String) {
         let app = Router::new()
             .route("/research/{id}", get(get_research))
             .route("/research/{id}/events", get(get_research_events))
+            .route("/research/request", post(post_research_request))
             .with_state(ApiState { db });
 
         let Ok(addr): Result<SocketAddr, _> = bind.parse() else {
@@ -49,6 +50,66 @@ pub fn spawn(db: Db, bind: String) {
             }
         }
     });
+}
+
+#[derive(Debug, Deserialize)]
+struct ResearchRequestBody {
+    problem: String,
+    #[serde(default)]
+    max_iterations: Option<u8>,
+    #[serde(default)]
+    skills_scope: Vec<String>,
+    #[serde(default)]
+    telegram_chat_id: Option<String>,
+    #[serde(default)]
+    telegram_message_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResearchRequestAccepted {
+    task_id: i64,
+    status: &'static str,
+}
+
+async fn post_research_request(
+    State(state): State<ApiState>,
+    Json(body): Json<ResearchRequestBody>,
+) -> impl IntoResponse {
+    if body.problem.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"problem must be non-empty"})),
+        )
+            .into_response();
+    }
+    let payload = serde_json::json!({
+        "problem": body.problem,
+        "max_iterations": body.max_iterations.unwrap_or(2),
+        "skills_scope": body.skills_scope,
+        "telegram": {
+            "chat_id": body.telegram_chat_id,
+            "message_id": body.telegram_message_id
+        }
+    });
+    match state
+        .db
+        .enqueue_agent_task(AgentTaskKind::Research, &payload)
+        .await
+    {
+        Ok(task_id) => (
+            StatusCode::ACCEPTED,
+            Json(ResearchRequestAccepted {
+                task_id,
+                status: "queued",
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_research_events(

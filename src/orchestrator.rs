@@ -17,6 +17,7 @@ use crate::{
         formula_extractor::FormulaExtractorAgent,
         harvester::FormulaHarvesterAgent,
         report::{ReportInput, ReportWriterAgent},
+        research_request::{ResearchContext, ResearchRequestAgent, ResearchResult},
         retrier::ErrorRetrierAgent,
         theorem::{TheoremInput, TheoremProverAgent},
         KnowledgeGraphAgent,
@@ -430,6 +431,24 @@ impl Orchestrator {
                 ticker.tick().await;
                 if let Err(e) = scheduler.tick().await {
                     warn!(error = %e, "scheduler tick failed");
+                }
+            }
+        });
+    }
+
+    /// Ad-hoc research request drain with solvability gating.
+    pub fn spawn_research_requests(&self, agent: ResearchRequestAgent) {
+        let db = self.db.clone();
+        let vault = self.vault.clone();
+        let interval = self.cfg.research_interval;
+        tokio::spawn(async move {
+            time::sleep(Duration::from_secs(12)).await;
+            let mut ticker = time::interval(interval);
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = drain_research_request(&db, &vault, &agent).await {
+                    warn!(error = %e, "research request drain failed");
                 }
             }
         });
@@ -1488,6 +1507,322 @@ async fn drain_formula_extract(
         }
     }
     Ok(())
+}
+
+async fn drain_research_request(
+    db: &Db,
+    vault: &Arc<VaultWriter>,
+    agent: &ResearchRequestAgent,
+) -> crate::error::AppResult<()> {
+    let batch_id = Uuid::new_v4().to_string();
+    let Some(task) = db
+        .claim_agent_task(AgentTaskKind::Research, &batch_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(&task.payload).unwrap_or(serde_json::Value::Null);
+    let request_id = format!("research-{}", task.id);
+    let ctx = ResearchCtx {
+        request_id: &request_id,
+        role: "research_request",
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "request_received",
+        0,
+        "queue",
+        Some(&task.payload),
+        None,
+        Some("api:research_request"),
+        None,
+    )
+    .await;
+
+    let problem = payload
+        .get("problem")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if problem.is_empty() {
+        emit_research_event(
+            db,
+            ctx,
+            "failed",
+            1,
+            "failed",
+            None,
+            Some("empty problem payload"),
+            None,
+            None,
+        )
+        .await;
+        db.fail_agent_task(task.id, "empty problem payload").await?;
+        return Ok(());
+    }
+    let max_iterations = payload
+        .get("max_iterations")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2)
+        .clamp(1, 6) as u8;
+    let skills_scope: Vec<String> = payload
+        .get("skills_scope")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    emit_research_event(
+        db,
+        ctx,
+        "plan_created",
+        1,
+        "planning",
+        Some(&problem),
+        Some("solvability gate started"),
+        None,
+        None,
+    )
+    .await;
+
+    let tokens = tokenize_problem(&problem);
+    let (topic_context, note_hits) = gather_problem_context(vault, &tokens).await;
+    let formula_context = gather_formula_context(db, &tokens, 16).await;
+    let formula_hits = formula_context.len();
+    let note_cov = (note_hits as f32 / 6.0).clamp(0.0, 1.0);
+    let formula_cov = (formula_hits as f32 / 6.0).clamp(0.0, 1.0);
+    let coverage = 0.75 * note_cov + 0.25 * formula_cov;
+    let solvable = coverage >= 0.35 && note_hits >= 2;
+    emit_research_event(
+        db,
+        ctx,
+        "solvability_checked",
+        2,
+        "gate",
+        Some(&format!("notes={note_hits}, formulas={formula_hits}")),
+        Some(&format!("coverage={coverage:.2}, solvable={solvable}")),
+        None,
+        None,
+    )
+    .await;
+
+    if !solvable {
+        let missing = missing_knowledge_hints(&tokens, note_hits, formula_hits);
+        let uns = ResearchResult {
+            title: format!("Unsolvable with current library: {problem}"),
+            summary: "Unable to solve with available vault knowledge.".to_string(),
+            markdown_body: format!(
+                "## Status\nUNSOLVABLE_INSUFFICIENT_KNOWLEDGE\n\n## Why\n- Query grounding in local notes is below threshold.\n- Required formulas/prerequisites are missing.\n\n## Missing Knowledge\n{}\n\n## Recommendation\nAdd source notes covering the missing topics and rerun.",
+                missing
+                    .iter()
+                    .map(|m| format!("- {m}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            references: Vec::new(),
+            open_questions: missing,
+            confidence: 0.0,
+        };
+        let artifact = vault.write_research(&uns).await?;
+        emit_research_event(
+            db,
+            ctx,
+            "finalized",
+            3,
+            "unsolved",
+            None,
+            Some("unsolvable: insufficient knowledge"),
+            None,
+            Some(&artifact.to_string_lossy()),
+        )
+        .await;
+        db.finish_agent_task(task.id).await?;
+        return Ok(());
+    }
+
+    let rctx = ResearchContext {
+        problem: problem.clone(),
+        max_iterations,
+        skills_scope,
+        topic_context,
+        formula_context,
+    };
+    emit_research_event(
+        db,
+        ctx,
+        "llm_call",
+        3,
+        "solve",
+        Some(&problem),
+        None,
+        None,
+        None,
+    )
+    .await;
+    match agent.run(&rctx).await {
+        Ok(out) => {
+            let artifact = vault.write_research(&out).await?;
+            emit_research_event(
+                db,
+                ctx,
+                "finalized",
+                4,
+                "finalize",
+                None,
+                Some("research draft written"),
+                None,
+                Some(&artifact.to_string_lossy()),
+            )
+            .await;
+            db.finish_agent_task(task.id).await?;
+        }
+        Err(e) => {
+            emit_research_event(
+                db,
+                ctx,
+                "failed",
+                4,
+                "failed",
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+            )
+            .await;
+            db.fail_agent_task(task.id, &e.to_string()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn tokenize_problem(problem: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for tok in problem
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::trim)
+        .filter(|t| t.len() >= 4)
+    {
+        let t = tok.to_lowercase();
+        if !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() >= 24 {
+            break;
+        }
+    }
+    out
+}
+
+async fn gather_problem_context(
+    vault: &Arc<VaultWriter>,
+    tokens: &[String],
+) -> (Vec<String>, usize) {
+    let mut contexts = Vec::new();
+    let mut hits = 0usize;
+    let mut stack = vec![vault.vault_dir().to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if ft.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some("Generated") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let low = content.to_lowercase();
+            let matched = tokens.iter().filter(|t| low.contains(t.as_str())).count();
+            if matched == 0 {
+                continue;
+            }
+            hits += 1;
+            let rel = path
+                .strip_prefix(vault.vault_dir())
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            let snippet = content_body(&content).chars().take(900).collect::<String>();
+            contexts.push(format!("### {rel}\n{snippet}"));
+            if contexts.len() >= 10 {
+                return (contexts, hits);
+            }
+        }
+    }
+    (contexts, hits)
+}
+
+async fn gather_formula_context(db: &Db, tokens: &[String], limit: usize) -> Vec<String> {
+    let Ok(rows) = db.list_formulas().await else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let mut hay = row.latex_norm.to_lowercase();
+        if let Some(c) = &row.context {
+            hay.push(' ');
+            hay.push_str(&c.to_lowercase());
+        }
+        if !tokens.iter().any(|t| hay.contains(t.as_str())) {
+            continue;
+        }
+        out.push(format!(
+            "$${}$$ [{}] {}",
+            row.latex,
+            row.note_rel_path,
+            row.context.unwrap_or_default()
+        ));
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+fn missing_knowledge_hints(
+    tokens: &[String],
+    note_hits: usize,
+    formula_hits: usize,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if note_hits < 2 {
+        missing.push(
+            "Add foundational notes for the target domain and benchmark variants.".to_string(),
+        );
+    }
+    if formula_hits == 0 {
+        missing.push(
+            "Add core mathematical formulations/objective functions relevant to the problem."
+                .to_string(),
+        );
+    }
+    if !tokens.is_empty() {
+        missing.push(format!(
+            "Create notes explicitly covering: {}.",
+            tokens
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    missing
 }
 
 async fn summarise_topic_by_tag(vault: &Arc<VaultWriter>, tag: &str) -> String {
