@@ -97,14 +97,49 @@ Information Lab is an edge-native autonomous pipeline that converts PDFs into an
 
 ```mermaid
 flowchart LR
-    PDF[Watched PDFs] --> INGEST[Ingest + Chunk]
-    INGEST --> DB[(SQLite)]
-    DB --> ORCH[Orchestrator + Scheduler]
-    ORCH --> AGENTS[Agent Fleet]
-    AGENTS --> VAULT[Vault Writer]
-    VAULT --> OBS[Obsidian Notes + Indexes + Artifacts]
-    ORCH --> API[Research API + Events]
+    PDF[Watched PDFs] --> INGEST[PDF Ingest + Chunking]
+    INGEST --> DB[(SQLite task state + chunks + indexes)]
+    DB --> ORCH[orchestrator]
+    API[Research API + timeline events] --> ORCH
+    ORCH --> FLEET[agent fleet]
+    FLEET --> VAULT[Vault writer]
+    VAULT --> OBS[Obsidian vault notes + indexes + artifacts]
     ORCH --> STATUS[SYSTEM_STATUS.md]
+    ORCH --> RTASKS[Research tasks]
+    RTASKS --> DB
+```
+
+```mermaid
+flowchart TD
+    PDF[Watched PDFs] --> INGEST[PDF ingest/chunking]
+    INGEST --> CK1[(SQLite task state checkpoint: ingest/chunks)]
+    CK1 --> ORCH[orchestrator]
+    API[API-triggered ad-hoc research path] --> ORCH
+
+    ORCH --> LIGHT[Light tier]
+    LIGHT --> EXTRACT[Extraction lane]
+    LIGHT --> FORMULA[Formula lane]
+    EXTRACT --> CK2[(SQLite task state checkpoint: extraction)]
+    FORMULA --> CK3[(SQLite task state checkpoint: formulas)]
+
+    CK2 --> HEAVY[Heavy tier]
+    CK3 --> HEAVY
+    ORCH --> HEAVY
+    HEAVY --> CURATOR[Curator lane]
+    HEAVY --> BRIDGE[Bridge lane]
+    HEAVY --> THEOREM[Theorem lane]
+    HEAVY --> DERIVATION[Derivation lane]
+    HEAVY --> REPORT[Report lane]
+
+    CURATOR --> CK4[(SQLite task state checkpoint: Research tasks)]
+    BRIDGE --> CK4
+    THEOREM --> CK4
+    DERIVATION --> CK4
+    REPORT --> CK4
+
+    CK4 --> VAULT[Vault write]
+    VAULT --> INDEX[Index updates]
+    INDEX --> STATUS[SYSTEM_STATUS.md]
 ```
 
 ## Documentation
